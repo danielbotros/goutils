@@ -68,6 +68,16 @@ type DialWebRTCOptions struct {
 	// Config is the WebRTC specific configuration (i.e. ICE settings)
 	Config *webrtc.Configuration
 
+	// ForceRelay forces all ICE connections to use relay (TURN) candidates only,
+	// bypassing host and server-reflexive candidates. Useful for testing relay
+	// connectivity and verifying TURN server configuration.
+	ForceRelay bool
+
+	// ForceP2P forces all ICE connections to use only host and server-reflexive
+	// candidates by stripping TURN servers from the ICE configuration. Useful for
+	// testing direct connectivity without relay fallback.
+	ForceP2P bool
+
 	// AllowAutoDetectAuthOptions allows authentication options to be automatically
 	// detected. Only use this if you trust the signaling server.
 	AllowAutoDetectAuthOptions bool
@@ -141,7 +151,15 @@ func dialWebRTC(
 	if dOpts.webrtcOpts.Config != nil {
 		config = *dOpts.webrtcOpts.Config
 	}
-	extendedConfig := extendWebRTCConfig(logger, &config, configResp.GetConfig(), extendWebRTCConfigOptions{})
+	if dOpts.webrtcOpts.ForceRelay {
+		config.ICETransportPolicy = webrtc.ICETransportPolicyRelay
+	}
+	optionalConfig := configResp.GetConfig()
+	if dOpts.webrtcOpts.ForceP2P {
+		// Strip TURN servers by ignoring the signaling server's ICE server list.
+		optionalConfig = nil
+	}
+	extendedConfig := extendWebRTCConfig(logger, &config, optionalConfig, extendWebRTCConfigOptions{})
 	peerConn, dataChannel, err := newPeerConnectionForClient(ctx, extendedConfig, dOpts.webrtcOpts.DisableTrickleICE, logger)
 	if err != nil {
 		return nil, err

@@ -233,7 +233,6 @@ enum ICECandidateType {
 }
 
 // ReportICECandidateSelectedRequest reports the ICE candidate type selected for a connection.
-// The host must be in the rpc-host metadata field.
 message ReportICECandidateSelectedRequest {
 	ICECandidateType candidate_type = 1;
 }

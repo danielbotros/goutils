@@ -464,9 +464,7 @@ func dialSignalingServer(
 	return conn, err
 }
 
-// reportSelectedICECandidateType reports the selected ICE candidate type to the signaling server
-// as a best-effort, fire-and-forget operation. Errors are logged at debug level and do not affect
-// the connection.
+// reportSelectedICECandidateType reports the selected ICE candidate type to the signaling server.
 func reportSelectedICECandidateType(
 	ctx context.Context,
 	host string,

@@ -516,7 +516,6 @@ func selectedICECandidateType(stats webrtc.StatsReport) webrtcpb.ICECandidateTyp
 		return webrtcpb.ICECandidateType_ICE_CANDIDATE_TYPE_UNSPECIFIED
 	}
 
-	//nolint:exhaustive
 	switch remoteCand.CandidateType {
 	case webrtc.ICECandidateTypeHost:
 		return webrtcpb.ICECandidateType_ICE_CANDIDATE_TYPE_HOST

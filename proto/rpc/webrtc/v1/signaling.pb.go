@@ -1395,7 +1395,6 @@ func (x *OptionalWebRTCConfigResponse) GetConfig() *WebRTCConfig {
 }
 
 // ReportICECandidateSelectedRequest reports the ICE candidate type selected for a connection.
-// The host must be in the rpc-host metadata field.
 type ReportICECandidateSelectedRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache

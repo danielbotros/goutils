@@ -3,10 +3,12 @@ package rpc
 import (
 	"context"
 	"io"
+	"slices"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/pion/stun"
 	"github.com/pkg/errors"
 	"github.com/viamrobotics/webrtc/v3"
 	"google.golang.org/grpc/codes"
@@ -74,7 +76,8 @@ type DialWebRTCOptions struct {
 	ForceRelay bool
 
 	// ForceP2P forces all ICE connections to use only host and server-reflexive
-	// candidates by stripping TURN servers from the ICE configuration. Useful for
+	// candidates by stripping TURN servers from both the app-provided ICE
+	// configuration and the signaling server's ICE configuration. Useful for
 	// testing direct connectivity without relay fallback.
 	ForceP2P bool
 
@@ -156,8 +159,8 @@ func dialWebRTC(
 	}
 	optionalConfig := configResp.GetConfig()
 	if dOpts.webrtcOpts.ForceP2P {
-		// Strip TURN servers by ignoring the signaling server's ICE server list.
 		optionalConfig = nil
+		config.ICEServers = slices.DeleteFunc(slices.Clone(config.ICEServers), iceServerHasTURN)
 	}
 	extendedConfig := extendWebRTCConfig(logger, &config, optionalConfig, extendWebRTCConfigOptions{})
 	peerConn, dataChannel, err := newPeerConnectionForClient(ctx, extendedConfig, dOpts.webrtcOpts.DisableTrickleICE, logger)
@@ -475,4 +478,15 @@ func dialSignalingServer(
 
 	conn, _, err := dialDirectGRPC(ctx, signalingServer, dOpts, logger)
 	return conn, err
+}
+
+// iceServerHasTURN reports whether any of the ICE server's URLs use a TURN scheme.
+func iceServerHasTURN(s webrtc.ICEServer) bool {
+	for _, rawURL := range s.URLs {
+		uri, err := stun.ParseURI(rawURL)
+		if err == nil && slices.Contains(validTurnSchemes, uri.Scheme) {
+			return true
+		}
+	}
+	return false
 }

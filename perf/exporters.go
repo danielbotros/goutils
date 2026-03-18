@@ -8,6 +8,7 @@ import (
 
 	"cloud.google.com/go/compute/metadata"
 	"contrib.go.opencensus.io/exporter/stackdriver"
+	"github.com/caarlos0/env/v11"
 	"go.opencensus.io/trace"
 
 	"go.viam.com/utils"
@@ -34,16 +35,29 @@ type CloudOptions struct {
 
 // NewCloudExporter creates a new Stackdriver (Cloud Monitoring) OpenCensus exporter with all options setup views registered..
 func NewCloudExporter(opts CloudOptions) (Exporter, error) {
+	envOpts, err := env.ParseAs[struct {
+		ReportingInterval        time.Duration `env:"OCSD_REPORTING_INTERVAL"`
+		BundleDelayThreshold     time.Duration `env:"OCSD_BUNDLE_DELAY"`
+		NumberOfWorkers          int           `env:"OCSD_WORKERS"`
+		TraceSpansBufferMaxBytes int           `env:"OCSD_BUFFER_MAX_BYTES"       envDefault:"52428800"`
+		BundleCountThreshold     int           `env:"OCSD_BUNDLE_COUNT_THRESHOLD"`
+	}]()
+	if err != nil {
+		opts.Logger.Errorf("failed to parse stackdriver exporter options from env, will use defaults: %v", err)
+		envOpts.TraceSpansBufferMaxBytes = 52428800
+	}
 	sdOpts := stackdriver.Options{
 		Context: opts.Context,
 		OnError: func(err error) {
 			opts.Logger.Errorw("opencensus stackdriver error", "error", err)
 		},
 		// ReportingInterval sets the frequency of reporting metrics to stackdriver backend.
-		ReportingInterval: 60 * time.Second,
-		MetricPrefix:      opts.MetricPrefix,
-		// TraceSpansBufferMaxBytes sets the maximum buffer size to 50MB before spans are dropped.
-		TraceSpansBufferMaxBytes: 50 << 20,
+		ReportingInterval:        envOpts.ReportingInterval,
+		BundleDelayThreshold:     envOpts.BundleDelayThreshold,
+		BundleCountThreshold:     envOpts.BundleCountThreshold,
+		NumberOfWorkers:          envOpts.NumberOfWorkers,
+		TraceSpansBufferMaxBytes: envOpts.TraceSpansBufferMaxBytes,
+		MetricPrefix:             opts.MetricPrefix,
 	}
 
 	// Allow a custom stackdriver project.

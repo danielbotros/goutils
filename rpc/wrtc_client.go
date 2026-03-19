@@ -402,7 +402,6 @@ func dialWebRTC(
 		successful = true
 
 		// Best-effort report of the selected ICE candidate type for per-org metrics.
-		// Must be called before exchangeCancel so the signaling conn is still open.
 		reportSelectedICECandidateType(ctx, host, signalingClient, peerConn, logger)
 
 		// Ensure the exchange goroutine has exited.
@@ -523,6 +522,9 @@ func selectedICECandidateType(stats webrtc.StatsReport) webrtcpb.ICECandidateTyp
 		return webrtcpb.ICECandidateType_ICE_CANDIDATE_TYPE_STUN
 	case webrtc.ICECandidateTypeRelay:
 		// Distinguish Viam's coturn server from Twilio (or other external) TURN servers by URL.
+		if remoteCand.URL == "" {
+			return webrtcpb.ICECandidateType_ICE_CANDIDATE_TYPE_UNSPECIFIED
+		}
 		if strings.Contains(remoteCand.URL, "viam.com") || strings.Contains(remoteCand.URL, "viaminternal") {
 			return webrtcpb.ICECandidateType_ICE_CANDIDATE_TYPE_COTURN_RELAY
 		}

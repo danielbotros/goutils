@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -74,6 +75,12 @@ type DialWebRTCOptions struct {
 	// bypassing host and server-reflexive candidates. Useful for testing relay
 	// connectivity and verifying TURN server configuration.
 	ForceRelay bool
+
+	// RelayHostFilter, when non-empty, retains only ICE servers whose URLs contain
+	// this host substring. Applied after the ICE config is assembled from defaults
+	// and the signaling server's optional config. Only meaningful when ForceRelay
+	// is true; ignored otherwise.
+	RelayHostFilter string
 
 	// ForceP2P forces all ICE connections to use only host and server-reflexive
 	// candidates by stripping TURN servers from both the app-provided ICE
@@ -163,6 +170,9 @@ func dialWebRTC(
 		config.ICEServers = slices.DeleteFunc(slices.Clone(config.ICEServers), iceServerHasTURN)
 	}
 	extendedConfig := extendWebRTCConfig(logger, &config, optionalConfig, extendWebRTCConfigOptions{})
+	if dOpts.webrtcOpts.ForceRelay && dOpts.webrtcOpts.RelayHostFilter != "" {
+		extendedConfig.ICEServers = filterICEServersByHost(extendedConfig.ICEServers, dOpts.webrtcOpts.RelayHostFilter)
+	}
 	peerConn, dataChannel, err := newPeerConnectionForClient(ctx, extendedConfig, dOpts.webrtcOpts.DisableTrickleICE, logger)
 	if err != nil {
 		return nil, err
@@ -478,6 +488,18 @@ func dialSignalingServer(
 
 	conn, _, err := dialDirectGRPC(ctx, signalingServer, dOpts, logger)
 	return conn, err
+}
+
+// filterICEServersByHost returns only the ICE servers whose URLs contain host as a substring.
+func filterICEServersByHost(servers []webrtc.ICEServer, host string) []webrtc.ICEServer {
+	return slices.DeleteFunc(slices.Clone(servers), func(s webrtc.ICEServer) bool {
+		for _, url := range s.URLs {
+			if strings.Contains(url, host) {
+				return false
+			}
+		}
+		return true
+	})
 }
 
 // iceServerHasTURN reports whether any of the ICE server's URLs use a TURN scheme.

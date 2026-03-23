@@ -257,8 +257,9 @@ func dialWebRTC(
 
 		var pendingCandidates sync.WaitGroup
 
-		// waitOneHost is closed when the first ICE candidate of type `Host` (e.g: 127.0.0.1) is
-		// found.
+		// waitOneHost is closed when the first usable ICE candidate is found. Under normal
+		// conditions this is a `Host` candidate (e.g: 127.0.0.1). When ForceRelay is set,
+		// pion only gathers relay candidates, so we also accept the first relay candidate.
 		waitOneHost := make(chan struct{})
 		var waitOneHostOnce sync.Once
 		peerConn.OnICECandidate(func(icecandidate *webrtc.ICECandidate) {
@@ -273,7 +274,8 @@ func dialWebRTC(
 				// candidate to wait for all other candidates to complete. Thus we only increment
 				// `pendingCandidates` for non-nil values.
 				pendingCandidates.Add(1)
-				if icecandidate.Typ == webrtc.ICECandidateTypeHost {
+				if icecandidate.Typ == webrtc.ICECandidateTypeHost ||
+					(dOpts.webrtcOpts.ForceRelay && icecandidate.Typ == webrtc.ICECandidateTypeRelay) {
 					waitOneHostOnce.Do(func() {
 						close(waitOneHost)
 					})

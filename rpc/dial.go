@@ -125,12 +125,6 @@ func dial(
 		isJustDomain = net.ParseIP(address) == nil
 	}
 
-	// When forcing relay-only mode, skip mDNS entirely: an mDNS-discovered address
-	// would bypass the TURN server and defeat the purpose of ForceRelay.
-	if dOpts.webrtcOpts.ForceRelay {
-		dOpts.mdnsOptions.Disable = true
-	}
-
 	// We make concurrent dial attempts via mDNS and WebRTC, taking the first connection
 	// that succeeds. We then cancel the slower connection and wait for its coroutine to
 	// complete. If the slower connection succeeds before it can be cancelled then we

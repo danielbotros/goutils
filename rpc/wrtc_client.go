@@ -81,11 +81,11 @@ type DialWebRTCOptions struct {
 	// testing direct connectivity without relay fallback.
 	ForceP2P bool
 
-	// TurnUri, when non-empty, filters the signaling server's TURN list to only
+	// TurnURI, when non-empty, filters the signaling server's TURN list to only
 	// the server whose parsed URI matches. Uses the same stun.URI struct
 	// comparison as the server-side TURN_URI env var. Leave transport unspecified
 	// for UDP default. Example: "turn:turn.viam.com:443"
-	TurnUri string
+	TurnURI string
 
 	// TurnScheme overrides the scheme of the matched TURN URI ("turn" or "turns").
 	// Use "turns" for TLS relay when UDP is blocked by a firewall.
@@ -179,9 +179,9 @@ func dialWebRTC(
 		config.ICEServers = slices.DeleteFunc(slices.Clone(config.ICEServers), iceServerHasTURN)
 	}
 	eWrtcOpts := extendWebRTCConfigOptions{}
-	if dOpts.webrtcOpts.TurnUri != "" {
-		if parsed, err := stun.ParseURI(dOpts.webrtcOpts.TurnUri); err != nil {
-			logger.Warnw("Failed to parse TurnUri, ignoring", "uri", dOpts.webrtcOpts.TurnUri)
+	if dOpts.webrtcOpts.TurnURI != "" {
+		if parsed, err := stun.ParseURI(dOpts.webrtcOpts.TurnURI); err != nil {
+			logger.Warnw("Failed to parse TurnURI, ignoring", "uri", dOpts.webrtcOpts.TurnURI)
 		} else {
 			eWrtcOpts.turnURI = parsed
 		}

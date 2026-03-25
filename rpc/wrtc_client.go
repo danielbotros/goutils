@@ -290,11 +290,11 @@ func dialWebRTC(
 
 		var pendingCandidates sync.WaitGroup
 
-		// waitOneHost is closed when the first usable ICE candidate is found. Under normal
-		// conditions this is a `Host` candidate (e.g: 127.0.0.1). When ForceRelay is set,
+		// waitFirstUsableCandidate is closed when the first usable ICE candidate is found. Under
+		// normal conditions this is a `Host` candidate (e.g: 127.0.0.1). When ForceRelay is set,
 		// pion only gathers relay candidates, so we also accept the first relay candidate.
-		waitOneHost := make(chan struct{})
-		var waitOneHostOnce sync.Once
+		waitFirstUsableCandidate := make(chan struct{})
+		var waitFirstUsableCandidateOnce sync.Once
 		peerConn.OnICECandidate(func(icecandidate *webrtc.ICECandidate) {
 			if exchangeCtx.Err() != nil {
 				// Caller has canceled the dial, or a timeout has occurred.
@@ -309,8 +309,8 @@ func dialWebRTC(
 				pendingCandidates.Add(1)
 				if icecandidate.Typ == webrtc.ICECandidateTypeHost ||
 					(dOpts.webrtcOpts.ForceRelay && icecandidate.Typ == webrtc.ICECandidateTypeRelay) {
-					waitOneHostOnce.Do(func() {
-						close(waitOneHost)
+					waitFirstUsableCandidateOnce.Do(func() {
+						close(waitFirstUsableCandidate)
 					})
 				}
 			}
@@ -369,7 +369,7 @@ func dialWebRTC(
 		case <-exchangeCtx.Done():
 			logger.Errorw("Failed while waiting for first host to be generated", "err", err)
 			return nil, exchangeCtx.Err()
-		case <-waitOneHost:
+		case <-waitFirstUsableCandidate:
 		}
 	}
 

@@ -4,7 +4,6 @@ import (
 	"context"
 	"io"
 	"slices"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -82,11 +81,21 @@ type DialWebRTCOptions struct {
 	// testing direct connectivity without relay fallback.
 	ForceP2P bool
 
-	// RelayHostFilter, when non-empty, filters the assembled ICE server list to
-	// only TURN servers whose URL contains the given substring. Non-TURN servers
-	// are unaffected. Can be combined with ForceRelay to force relay through a
-	// specific TURN server.
-	RelayHostFilter string
+	// TurnUri, when non-empty, filters the signaling server's TURN list to only
+	// the server whose parsed URI matches. Uses the same stun.URI struct
+	// comparison as the server-side TURN_URI env var. Leave transport unspecified
+	// for UDP default. Example: "turn:turn.viam.com:443"
+	TurnUri string
+
+	// TurnScheme overrides the scheme of the matched TURN URI ("turn" or "turns").
+	// Use "turns" for TLS relay when UDP is blocked by a firewall.
+	TurnScheme string
+
+	// TurnTransport overrides the transport of the matched TURN URI ("tcp" or "udp").
+	TurnTransport string
+
+	// TurnPort overrides the port of the matched TURN URI. 0 means no override.
+	TurnPort int
 
 	// AllowAutoDetectAuthOptions allows authentication options to be automatically
 	// detected. Only use this if you trust the signaling server.
@@ -169,10 +178,24 @@ func dialWebRTC(
 		optionalConfig = nil
 		config.ICEServers = slices.DeleteFunc(slices.Clone(config.ICEServers), iceServerHasTURN)
 	}
-	extendedConfig := extendWebRTCConfig(logger, &config, optionalConfig, extendWebRTCConfigOptions{})
-	if dOpts.webrtcOpts.RelayHostFilter != "" {
-		extendedConfig.ICEServers = filterICEServersByHost(extendedConfig.ICEServers, dOpts.webrtcOpts.RelayHostFilter)
+	eWrtcOpts := extendWebRTCConfigOptions{}
+	if dOpts.webrtcOpts.TurnUri != "" {
+		if parsed, err := stun.ParseURI(dOpts.webrtcOpts.TurnUri); err != nil {
+			logger.Warnw("Failed to parse TurnUri, ignoring", "uri", dOpts.webrtcOpts.TurnUri)
+		} else {
+			eWrtcOpts.turnURI = parsed
+		}
 	}
+	if dOpts.webrtcOpts.TurnScheme != "" {
+		eWrtcOpts.turnScheme = stun.NewSchemeType(dOpts.webrtcOpts.TurnScheme)
+	}
+	if dOpts.webrtcOpts.TurnPort != 0 {
+		eWrtcOpts.turnPort = dOpts.webrtcOpts.TurnPort
+	}
+	if dOpts.webrtcOpts.TurnTransport == "tcp" {
+		eWrtcOpts.replaceUDPWithTCP = true
+	}
+	extendedConfig := extendWebRTCConfig(logger, &config, optionalConfig, eWrtcOpts)
 	peerConn, dataChannel, err := newPeerConnectionForClient(ctx, extendedConfig, dOpts.webrtcOpts.DisableTrickleICE, logger)
 	if err != nil {
 		return nil, err
@@ -490,22 +513,6 @@ func dialSignalingServer(
 
 	conn, _, err := dialDirectGRPC(ctx, signalingServer, dOpts, logger)
 	return conn, err
-}
-
-// filterICEServersByHost removes TURN servers from servers whose URLs do not
-// contain host. Non-TURN servers are left unchanged.
-func filterICEServersByHost(servers []webrtc.ICEServer, host string) []webrtc.ICEServer {
-	return slices.DeleteFunc(slices.Clone(servers), func(s webrtc.ICEServer) bool {
-		if !iceServerHasTURN(s) {
-			return false
-		}
-		for _, rawURL := range s.URLs {
-			if strings.Contains(rawURL, host) {
-				return false
-			}
-		}
-		return true
-	})
 }
 
 // iceServerHasTURN reports whether any of the ICE server's URLs use a TURN scheme.

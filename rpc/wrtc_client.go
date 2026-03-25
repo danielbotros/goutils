@@ -187,13 +187,23 @@ func dialWebRTC(
 		}
 	}
 	if dOpts.webrtcOpts.TurnScheme != "" {
-		eWrtcOpts.turnScheme = stun.NewSchemeType(dOpts.webrtcOpts.TurnScheme)
+		scheme := stun.NewSchemeType(dOpts.webrtcOpts.TurnScheme)
+		if !slices.Contains(validTurnSchemes, scheme) {
+			logger.Warnw("Unrecognized TurnScheme, ignoring (valid: \"turn\", \"turns\")", "scheme", dOpts.webrtcOpts.TurnScheme)
+		} else {
+			eWrtcOpts.turnScheme = scheme
+		}
 	}
 	if dOpts.webrtcOpts.TurnPort != 0 {
 		eWrtcOpts.turnPort = dOpts.webrtcOpts.TurnPort
 	}
-	if dOpts.webrtcOpts.TurnTransport == "tcp" {
+	switch dOpts.webrtcOpts.TurnTransport {
+	case "", "udp":
+		// default — no override needed
+	case "tcp":
 		eWrtcOpts.replaceUDPWithTCP = true
+	default:
+		logger.Warnw("Unrecognized TurnTransport, ignoring (valid: \"tcp\", \"udp\")", "transport", dOpts.webrtcOpts.TurnTransport)
 	}
 	extendedConfig := extendWebRTCConfig(logger, &config, optionalConfig, eWrtcOpts)
 	peerConn, dataChannel, err := newPeerConnectionForClient(ctx, extendedConfig, dOpts.webrtcOpts.DisableTrickleICE, logger)

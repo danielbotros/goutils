@@ -179,31 +179,35 @@ func dialWebRTC(
 		config.ICEServers = slices.DeleteFunc(slices.Clone(config.ICEServers), iceServerHasTURN)
 	}
 	eWrtcOpts := extendWebRTCConfigOptions{}
+	turnURIInvalid := false
 	if dOpts.webrtcOpts.TurnURI != "" {
 		if parsed, err := stun.ParseURI(dOpts.webrtcOpts.TurnURI); err != nil {
-			logger.Warnw("Failed to parse TurnURI, ignoring", "uri", dOpts.webrtcOpts.TurnURI)
+			logger.Warnw("Failed to parse TurnURI, ignoring all TURN URI options", "uri", dOpts.webrtcOpts.TurnURI)
+			turnURIInvalid = true
 		} else {
 			eWrtcOpts.turnURI = parsed
 		}
 	}
-	if dOpts.webrtcOpts.TurnScheme != "" {
-		scheme := stun.NewSchemeType(dOpts.webrtcOpts.TurnScheme)
-		if !slices.Contains(validTurnSchemes, scheme) {
-			logger.Warnw("Unrecognized TurnScheme, ignoring (valid: \"turn\", \"turns\")", "scheme", dOpts.webrtcOpts.TurnScheme)
-		} else {
-			eWrtcOpts.turnScheme = scheme
+	if !turnURIInvalid {
+		if dOpts.webrtcOpts.TurnScheme != "" {
+			scheme := stun.NewSchemeType(dOpts.webrtcOpts.TurnScheme)
+			if !slices.Contains(validTurnSchemes, scheme) {
+				logger.Warnw("Unrecognized TurnScheme, ignoring (valid: \"turn\", \"turns\")", "scheme", dOpts.webrtcOpts.TurnScheme)
+			} else {
+				eWrtcOpts.turnScheme = scheme
+			}
 		}
-	}
-	if dOpts.webrtcOpts.TurnPort != 0 {
-		eWrtcOpts.turnPort = dOpts.webrtcOpts.TurnPort
-	}
-	switch dOpts.webrtcOpts.TurnTransport {
-	case "", "udp":
-		// default — no override needed
-	case "tcp":
-		eWrtcOpts.replaceUDPWithTCP = true
-	default:
-		logger.Warnw("Unrecognized TurnTransport, ignoring (valid: \"tcp\", \"udp\")", "transport", dOpts.webrtcOpts.TurnTransport)
+		if dOpts.webrtcOpts.TurnPort != 0 {
+			eWrtcOpts.turnPort = dOpts.webrtcOpts.TurnPort
+		}
+		switch dOpts.webrtcOpts.TurnTransport {
+		case "", "udp":
+			// default — no override needed
+		case "tcp":
+			eWrtcOpts.replaceUDPWithTCP = true
+		default:
+			logger.Warnw("Unrecognized TurnTransport, ignoring (valid: \"tcp\", \"udp\")", "transport", dOpts.webrtcOpts.TurnTransport)
+		}
 	}
 	extendedConfig := extendWebRTCConfig(logger, &config, optionalConfig, eWrtcOpts)
 	peerConn, dataChannel, err := newPeerConnectionForClient(ctx, extendedConfig, dOpts.webrtcOpts.DisableTrickleICE, logger)

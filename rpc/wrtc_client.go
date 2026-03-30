@@ -71,24 +71,20 @@ type DialWebRTCOptions struct {
 	Config *webrtc.Configuration
 
 	// ForceRelay forces all ICE connections to use relay (TURN) candidates only,
-	// bypassing host and server-reflexive candidates. Useful for testing relay
-	// connectivity and verifying TURN server configuration.
+	// bypassing host and server-reflexive candidates.
 	ForceRelay bool
 
 	// ForceP2P forces all ICE connections to use only host and server-reflexive
 	// candidates by stripping TURN servers from both the app-provided ICE
-	// configuration and the signaling server's ICE configuration. Useful for
-	// testing direct connectivity without relay fallback.
+	// configuration. Useful for testing direct connectivity without relay fallback.
 	ForceP2P bool
 
 	// TurnURI, when non-empty, filters the signaling server's TURN list to only
-	// the server whose parsed URI matches. Uses the same stun.URI struct
-	// comparison as the server-side TURN_URI env var. Leave transport unspecified
+	// the server whose parsed URI matches. Leave transport unspecified
 	// for UDP default. Example: "turn:turn.viam.com:443"
 	TurnURI string
 
 	// TurnScheme overrides the scheme of the matched TURN URI ("turn" or "turns").
-	// Use "turns" for TLS relay when UDP is blocked by a firewall.
 	TurnScheme string
 
 	// TurnTransport overrides the transport of the matched TURN URI ("tcp" or "udp").

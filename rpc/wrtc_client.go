@@ -401,7 +401,6 @@ func dialWebRTC(
 		sendDone()
 		successful = true
 
-		// Best-effort report of connection metadata for per-org metrics.
 		reportConnectionMetadata(ctx, host, signalingClient, peerConn, logger)
 
 		// Ensure the exchange goroutine has exited.

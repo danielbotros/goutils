@@ -48,11 +48,12 @@ service SignalingService {
 		};
 	}
 
-	// ReportICECandidateSelected reports the ICE candidate type selected for a WebRTC
-	// connection. The host must be in the rpc-host metadata field.
-	rpc ReportICECandidateSelected(ReportICECandidateSelectedRequest) returns (ReportICECandidateSelectedResponse) {
+	// ReportConnectionMetadata reports metadata about an established WebRTC connection,
+	// including the selected ICE candidate type and the SDK used. The host must be in
+	// the rpc-host metadata field.
+	rpc ReportConnectionMetadata(ReportConnectionMetadataRequest) returns (ReportConnectionMetadataResponse) {
 		option (google.api.http) = {
-			post: "/rpc/webrtc/v1/report_ice_candidate_selected"
+			post: "/rpc/webrtc/v1/report_connection_metadata"
 		};
 	}
 }
@@ -232,13 +233,22 @@ enum ICECandidateType {
 	ICE_CANDIDATE_TYPE_TWILIO_RELAY = 4;
 }
 
-// ReportICECandidateSelectedRequest reports the ICE candidate type selected for a connection.
-message ReportICECandidateSelectedRequest {
-	ICECandidateType candidate_type = 1;
+// SDKType represents the Viam SDK used to establish the connection.
+enum SDKType {
+	SDK_TYPE_UNSPECIFIED = 0;
+	SDK_TYPE_GO = 1;
+	SDK_TYPE_TYPESCRIPT = 2;
+	SDK_TYPE_PYTHON_CPP = 3;
 }
 
-// ReportICECandidateSelectedResponse is empty.
-message ReportICECandidateSelectedResponse {
+// ReportConnectionMetadataRequest reports metadata about an established WebRTC connection.
+message ReportConnectionMetadataRequest {
+	ICECandidateType candidate_type = 1;
+	SDKType sdk_type = 2;
+}
+
+// ReportConnectionMetadataResponse is empty.
+message ReportConnectionMetadataResponse {
 }
 
 

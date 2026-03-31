@@ -19,11 +19,11 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	SignalingService_Call_FullMethodName                       = "/proto.rpc.webrtc.v1.SignalingService/Call"
-	SignalingService_CallUpdate_FullMethodName                 = "/proto.rpc.webrtc.v1.SignalingService/CallUpdate"
-	SignalingService_Answer_FullMethodName                     = "/proto.rpc.webrtc.v1.SignalingService/Answer"
-	SignalingService_OptionalWebRTCConfig_FullMethodName       = "/proto.rpc.webrtc.v1.SignalingService/OptionalWebRTCConfig"
-	SignalingService_ReportICECandidateSelected_FullMethodName = "/proto.rpc.webrtc.v1.SignalingService/ReportICECandidateSelected"
+	SignalingService_Call_FullMethodName                     = "/proto.rpc.webrtc.v1.SignalingService/Call"
+	SignalingService_CallUpdate_FullMethodName               = "/proto.rpc.webrtc.v1.SignalingService/CallUpdate"
+	SignalingService_Answer_FullMethodName                   = "/proto.rpc.webrtc.v1.SignalingService/Answer"
+	SignalingService_OptionalWebRTCConfig_FullMethodName     = "/proto.rpc.webrtc.v1.SignalingService/OptionalWebRTCConfig"
+	SignalingService_ReportConnectionMetadata_FullMethodName = "/proto.rpc.webrtc.v1.SignalingService/ReportConnectionMetadata"
 )
 
 // SignalingServiceClient is the client API for SignalingService service.
@@ -55,9 +55,10 @@ type SignalingServiceClient interface {
 	// OptionalWebRTCConfig returns any WebRTC configuration the caller may want to use.
 	// The host to get a config for must be in the rpc-host metadata field.
 	OptionalWebRTCConfig(ctx context.Context, in *OptionalWebRTCConfigRequest, opts ...grpc.CallOption) (*OptionalWebRTCConfigResponse, error)
-	// ReportICECandidateSelected reports the ICE candidate type selected for a WebRTC
-	// connection. The host must be in the rpc-host metadata field.
-	ReportICECandidateSelected(ctx context.Context, in *ReportICECandidateSelectedRequest, opts ...grpc.CallOption) (*ReportICECandidateSelectedResponse, error)
+	// ReportConnectionMetadata reports metadata about an established WebRTC connection,
+	// including the selected ICE candidate type and the SDK used. The host must be in
+	// the rpc-host metadata field.
+	ReportConnectionMetadata(ctx context.Context, in *ReportConnectionMetadataRequest, opts ...grpc.CallOption) (*ReportConnectionMetadataResponse, error)
 }
 
 type signalingServiceClient struct {
@@ -120,10 +121,10 @@ func (c *signalingServiceClient) OptionalWebRTCConfig(ctx context.Context, in *O
 	return out, nil
 }
 
-func (c *signalingServiceClient) ReportICECandidateSelected(ctx context.Context, in *ReportICECandidateSelectedRequest, opts ...grpc.CallOption) (*ReportICECandidateSelectedResponse, error) {
+func (c *signalingServiceClient) ReportConnectionMetadata(ctx context.Context, in *ReportConnectionMetadataRequest, opts ...grpc.CallOption) (*ReportConnectionMetadataResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ReportICECandidateSelectedResponse)
-	err := c.cc.Invoke(ctx, SignalingService_ReportICECandidateSelected_FullMethodName, in, out, cOpts...)
+	out := new(ReportConnectionMetadataResponse)
+	err := c.cc.Invoke(ctx, SignalingService_ReportConnectionMetadata_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -159,9 +160,10 @@ type SignalingServiceServer interface {
 	// OptionalWebRTCConfig returns any WebRTC configuration the caller may want to use.
 	// The host to get a config for must be in the rpc-host metadata field.
 	OptionalWebRTCConfig(context.Context, *OptionalWebRTCConfigRequest) (*OptionalWebRTCConfigResponse, error)
-	// ReportICECandidateSelected reports the ICE candidate type selected for a WebRTC
-	// connection. The host must be in the rpc-host metadata field.
-	ReportICECandidateSelected(context.Context, *ReportICECandidateSelectedRequest) (*ReportICECandidateSelectedResponse, error)
+	// ReportConnectionMetadata reports metadata about an established WebRTC connection,
+	// including the selected ICE candidate type and the SDK used. The host must be in
+	// the rpc-host metadata field.
+	ReportConnectionMetadata(context.Context, *ReportConnectionMetadataRequest) (*ReportConnectionMetadataResponse, error)
 	mustEmbedUnimplementedSignalingServiceServer()
 }
 
@@ -184,8 +186,8 @@ func (UnimplementedSignalingServiceServer) Answer(grpc.BidiStreamingServer[Answe
 func (UnimplementedSignalingServiceServer) OptionalWebRTCConfig(context.Context, *OptionalWebRTCConfigRequest) (*OptionalWebRTCConfigResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method OptionalWebRTCConfig not implemented")
 }
-func (UnimplementedSignalingServiceServer) ReportICECandidateSelected(context.Context, *ReportICECandidateSelectedRequest) (*ReportICECandidateSelectedResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method ReportICECandidateSelected not implemented")
+func (UnimplementedSignalingServiceServer) ReportConnectionMetadata(context.Context, *ReportConnectionMetadataRequest) (*ReportConnectionMetadataResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReportConnectionMetadata not implemented")
 }
 func (UnimplementedSignalingServiceServer) mustEmbedUnimplementedSignalingServiceServer() {}
 func (UnimplementedSignalingServiceServer) testEmbeddedByValue()                          {}
@@ -262,20 +264,20 @@ func _SignalingService_OptionalWebRTCConfig_Handler(srv interface{}, ctx context
 	return interceptor(ctx, in, info, handler)
 }
 
-func _SignalingService_ReportICECandidateSelected_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ReportICECandidateSelectedRequest)
+func _SignalingService_ReportConnectionMetadata_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReportConnectionMetadataRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(SignalingServiceServer).ReportICECandidateSelected(ctx, in)
+		return srv.(SignalingServiceServer).ReportConnectionMetadata(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: SignalingService_ReportICECandidateSelected_FullMethodName,
+		FullMethod: SignalingService_ReportConnectionMetadata_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(SignalingServiceServer).ReportICECandidateSelected(ctx, req.(*ReportICECandidateSelectedRequest))
+		return srv.(SignalingServiceServer).ReportConnectionMetadata(ctx, req.(*ReportConnectionMetadataRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -296,8 +298,8 @@ var SignalingService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _SignalingService_OptionalWebRTCConfig_Handler,
 		},
 		{
-			MethodName: "ReportICECandidateSelected",
-			Handler:    _SignalingService_ReportICECandidateSelected_Handler,
+			MethodName: "ReportConnectionMetadata",
+			Handler:    _SignalingService_ReportConnectionMetadata_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

@@ -401,8 +401,8 @@ func dialWebRTC(
 		sendDone()
 		successful = true
 
-		// Best-effort report of the selected ICE candidate type for per-org metrics.
-		reportSelectedICECandidateType(ctx, host, signalingClient, peerConn, logger)
+		// Best-effort report of connection metadata for per-org metrics.
+		reportConnectionMetadata(ctx, host, signalingClient, peerConn, logger)
 
 		// Ensure the exchange goroutine has exited.
 		exchangeCancel(nil)
@@ -463,8 +463,8 @@ func dialSignalingServer(
 	return conn, err
 }
 
-// reportSelectedICECandidateType reports the selected ICE candidate type to the signaling server.
-func reportSelectedICECandidateType(
+// reportConnectionMetadata reports WebRTC connection metadata to the signaling server.
+func reportConnectionMetadata(
 	ctx context.Context,
 	host string,
 	signalingClient webrtcpb.SignalingServiceClient,
@@ -481,10 +481,11 @@ func reportSelectedICECandidateType(
 	defer cancel()
 	reportCtx = metadata.NewOutgoingContext(reportCtx, metadata.New(map[string]string{RPCHostMetadataField: host}))
 
-	if _, err := signalingClient.ReportICECandidateSelected(reportCtx, &webrtcpb.ReportICECandidateSelectedRequest{
+	if _, err := signalingClient.ReportConnectionMetadata(reportCtx, &webrtcpb.ReportConnectionMetadataRequest{
 		CandidateType: candidateType,
+		SdkType:       webrtcpb.SDKType_SDK_TYPE_GO,
 	}); err != nil {
-		logger.Debugw("failed to report selected ICE candidate type", "err", err)
+		logger.Debugw("failed to report connection metadata", "err", err)
 	}
 }
 

@@ -471,10 +471,6 @@ func reportConnectionMetadata(
 	logger utils.ZapCompatibleLogger,
 ) {
 	candidateType := selectedICECandidateType(peerConn.GetStats())
-	if candidateType == webrtcpb.ICECandidateType_ICE_CANDIDATE_TYPE_UNSPECIFIED {
-		logger.Debugw("could not determine selected ICE candidate type, skipping report")
-		return
-	}
 
 	reportCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()

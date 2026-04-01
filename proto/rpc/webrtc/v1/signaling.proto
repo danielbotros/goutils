@@ -250,5 +250,3 @@ message ReportConnectionMetadataRequest {
 // ReportConnectionMetadataResponse is empty.
 message ReportConnectionMetadataResponse {
 }
-
-

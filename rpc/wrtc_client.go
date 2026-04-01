@@ -521,7 +521,7 @@ func selectedICECandidateType(stats webrtc.StatsReport) webrtcpb.ICECandidateTyp
 		if remoteCand.URL == "" {
 			return webrtcpb.ICECandidateType_ICE_CANDIDATE_TYPE_UNSPECIFIED
 		}
-		if strings.Contains(remoteCand.URL, "viam.com") || strings.Contains(remoteCand.URL, "viaminternal") {
+		if strings.Contains(remoteCand.URL, "viam.com") {
 			return webrtcpb.ICECandidateType_ICE_CANDIDATE_TYPE_COTURN_RELAY
 		}
 		return webrtcpb.ICECandidateType_ICE_CANDIDATE_TYPE_TWILIO_RELAY

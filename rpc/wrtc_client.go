@@ -166,13 +166,28 @@ func dialWebRTC(
 	if dOpts.webrtcOpts.Config != nil {
 		config = *dOpts.webrtcOpts.Config
 	}
+
+	if dOpts.webrtcOpts.ForceRelay && dOpts.webrtcOpts.ForceP2P {
+		logger.Warnw("forceRelay and forceP2P are both set; forceP2P strips TURN servers that forceRelay requires so the connection will fail")
+	}
+
 	if dOpts.webrtcOpts.ForceRelay {
+		logger.Debug("force relay enabled; using relay-only ICE transport policy")
 		config.ICETransportPolicy = webrtc.ICETransportPolicyRelay
 	}
+
 	optionalConfig := configResp.GetConfig()
 	if dOpts.webrtcOpts.ForceP2P {
+		logger.Debug("force P2P enabled; stripping TURN servers and ignoring signaling server ICE config")
 		optionalConfig = nil
 		config.ICEServers = slices.DeleteFunc(slices.Clone(config.ICEServers), iceServerHasTURN)
+	}
+
+	if dOpts.webrtcOpts.ForceP2P && (dOpts.webrtcOpts.TurnURI != "" ||
+		dOpts.webrtcOpts.TurnScheme != "" ||
+		dOpts.webrtcOpts.TurnTransport != "" ||
+		dOpts.webrtcOpts.TurnPort != 0) {
+		logger.Warnw("forceP2P is set alongside TURN options; the TURN filter will have no effect since TURN servers were already stripped")
 	}
 	eWrtcOpts := extendWebRTCConfigOptions{}
 	turnURIInvalid := false
@@ -204,6 +219,12 @@ func dialWebRTC(
 		default:
 			logger.Warnw("Unrecognized TurnTransport, ignoring (valid: \"tcp\", \"udp\")", "transport", dOpts.webrtcOpts.TurnTransport)
 		}
+		logger.Debugw("TURN filter options set",
+			"turn_uri", eWrtcOpts.turnURI,
+			"turn_scheme", eWrtcOpts.turnScheme,
+			"turn_port", eWrtcOpts.turnPort,
+			"turn_transport", dOpts.webrtcOpts.TurnTransport,
+		)
 	}
 	extendedConfig := extendWebRTCConfig(logger, &config, optionalConfig, eWrtcOpts)
 	peerConn, dataChannel, err := newPeerConnectionForClient(ctx, extendedConfig, dOpts.webrtcOpts.DisableTrickleICE, logger)

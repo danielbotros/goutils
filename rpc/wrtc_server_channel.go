@@ -7,6 +7,7 @@ import (
 
 	"github.com/viamrobotics/webrtc/v3"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/stats"
 	"google.golang.org/protobuf/proto"
 
 	"go.viam.com/utils"
@@ -127,6 +128,12 @@ func (ch *webrtcServerChannel) onChannelMessage(msg webrtc.DataChannelMessage) {
 		// implies that auth should be allowed here, which is not 100% true.
 		// TODO(RSDK-890): use the correct entity (sub), not the audience (hosts)
 		handlerCtx = ContextWithAuthEntity(handlerCtx, EntityInfo{Entity: ch.authAudience})
+
+		if sh := ch.server.statsHandler; sh != nil {
+			handlerCtx = sh.TagRPC(handlerCtx, &stats.RPCTagInfo{FullMethodName: headers.Headers.GetMethod()})
+			sh.HandleRPC(handlerCtx, &stats.InHeader{})
+		}
+
 		logger := utils.AddFieldsToLogger(ch.webrtcBaseChannel.logger, "id", id)
 		serverStream = newWebRTCServerStream(handlerCtx, cancelCtx, headers.Headers.GetMethod(), ch, stream, ch.removeStreamByID, logger)
 		ch.streams[id] = serverStream

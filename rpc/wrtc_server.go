@@ -11,6 +11,7 @@ import (
 
 	"github.com/viamrobotics/webrtc/v3"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/stats"
 
 	"go.viam.com/utils"
 )
@@ -31,6 +32,7 @@ type webrtcServer struct {
 	unaryInt          grpc.UnaryServerInterceptor
 	streamInt         grpc.StreamServerInterceptor
 	unknownStreamDesc *grpc.StreamDesc
+	statsHandler      stats.Handler
 
 	counters struct {
 		PeersActive             atomic.Int64
@@ -84,26 +86,17 @@ type serviceInfo struct {
 
 // newWebRTCServer makes a new server with no registered services.
 func newWebRTCServer(logger utils.ZapCompatibleLogger) *webrtcServer {
-	return newWebRTCServerWithInterceptors(logger, nil, nil)
+	return newWebRTCServerWithOptions(logger, nil, nil, nil, nil)
 }
 
-// newWebRTCServerWithInterceptors makes a new server with no registered services that will
-// use the given interceptors.
-func newWebRTCServerWithInterceptors(
-	logger utils.ZapCompatibleLogger,
-	unaryInt grpc.UnaryServerInterceptor,
-	streamInt grpc.StreamServerInterceptor,
-) *webrtcServer {
-	return newWebRTCServerWithInterceptorsAndUnknownStreamHandler(logger, unaryInt, streamInt, nil)
-}
-
-// newWebRTCServerWithInterceptorsAndUnknownStreamHandler makes a new server with no registered services that will
-// use the given interceptors and unknown stream handler.
-func newWebRTCServerWithInterceptorsAndUnknownStreamHandler(
+// newWebRTCServerWithOptions makes a new server with no registered services that will
+// use the given interceptors, unknown stream handler, and stats handler.
+func newWebRTCServerWithOptions(
 	logger utils.ZapCompatibleLogger,
 	unaryInt grpc.UnaryServerInterceptor,
 	streamInt grpc.StreamServerInterceptor,
 	unknownStreamDesc *grpc.StreamDesc,
+	statsHandler stats.Handler,
 ) *webrtcServer {
 	srv := &webrtcServer{
 		handlers:          map[string]handlerFunc{},
@@ -113,6 +106,7 @@ func newWebRTCServerWithInterceptorsAndUnknownStreamHandler(
 		unaryInt:          unaryInt,
 		streamInt:         streamInt,
 		unknownStreamDesc: unknownStreamDesc,
+		statsHandler:      statsHandler,
 	}
 	srv.workers = utils.NewBackgroundStoppableWorkers()
 	srv.workers.Add(srv.pcCloseLoop)

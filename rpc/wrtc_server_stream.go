@@ -12,6 +12,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/stats"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
@@ -257,6 +258,10 @@ func (s *webrtcServerStream) processHeaders(headers *webrtcpb.RequestHeaders) {
 	s.ch.server.counters.HeadersProcessed.Add(1)
 	s.headersReceived = true
 	s.ch.server.workers.Add(func(ctx context.Context) {
+		if sh := s.ch.server.statsHandler; sh != nil {
+			sh.HandleRPC(s.ctx, &stats.Begin{})
+			defer func() { sh.HandleRPC(s.ctx, &stats.End{}) }()
+		}
 		// we're not checking/logging the error here because it is handled
 		// by [rpc.grpcUnaryServerInterceptor] and [rpc.grpcStreamServerInterceptor].
 		//nolint:errcheck,gosec

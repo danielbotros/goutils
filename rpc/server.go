@@ -665,20 +665,13 @@ func NewServer(logger utils.ZapCompatibleLogger, opts ...ServerOption) (Server, 
 		unaryInterceptor := grpc_middleware.ChainUnaryServer(webrtcUnaryInterceptors...)
 		streamInterceptor := grpc_middleware.ChainStreamServer(webrtcStreamInterceptors...)
 
-		if sOpts.unknownStreamDesc == nil {
-			server.webrtcServer = newWebRTCServerWithInterceptors(
-				logger,
-				unaryInterceptor,
-				streamInterceptor,
-			)
-		} else {
-			server.webrtcServer = newWebRTCServerWithInterceptorsAndUnknownStreamHandler(
-				logger,
-				unaryInterceptor,
-				streamInterceptor,
-				sOpts.unknownStreamDesc,
-			)
-		}
+		server.webrtcServer = newWebRTCServerWithOptions(
+			logger,
+			unaryInterceptor,
+			streamInterceptor,
+			sOpts.unknownStreamDesc,
+			sOpts.statsHandler,
+		)
 		reflection.Register(server.webrtcServer)
 
 		config := DefaultWebRTCConfiguration

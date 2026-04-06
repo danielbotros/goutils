@@ -3,10 +3,12 @@ package rpc
 import (
 	"context"
 	"io"
+	"slices"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/pion/stun"
 	"github.com/pkg/errors"
 	"github.com/viamrobotics/webrtc/v3"
 	"google.golang.org/grpc/codes"
@@ -67,6 +69,29 @@ type DialWebRTCOptions struct {
 
 	// Config is the WebRTC specific configuration (i.e. ICE settings)
 	Config *webrtc.Configuration
+
+	// ForceRelay forces all ICE connections to use relay (TURN) candidates only,
+	// bypassing host and server-reflexive candidates.
+	ForceRelay bool
+
+	// ForceP2P forces all ICE connections to use only host and server-reflexive
+	// candidates by stripping TURN servers from both the app-provided ICE
+	// configuration. Useful for testing direct connectivity without relay fallback.
+	ForceP2P bool
+
+	// TurnURI, when non-empty, filters the signaling server's TURN list to only
+	// the server whose parsed URI matches. Leave transport unspecified
+	// for UDP default. Example: "turn:turn.viam.com:443"
+	TurnURI string
+
+	// TurnScheme overrides the scheme of the matched TURN URI ("turn" or "turns").
+	TurnScheme string
+
+	// TurnTransport overrides the transport of the matched TURN URI ("tcp" or "udp").
+	TurnTransport string
+
+	// TurnPort overrides the port of the matched TURN URI. 0 means no override.
+	TurnPort int
 
 	// AllowAutoDetectAuthOptions allows authentication options to be automatically
 	// detected. Only use this if you trust the signaling server.
@@ -141,7 +166,67 @@ func dialWebRTC(
 	if dOpts.webrtcOpts.Config != nil {
 		config = *dOpts.webrtcOpts.Config
 	}
-	extendedConfig := extendWebRTCConfig(logger, &config, configResp.GetConfig(), extendWebRTCConfigOptions{})
+
+	if dOpts.webrtcOpts.ForceRelay && dOpts.webrtcOpts.ForceP2P {
+		logger.Warnw("forceRelay and forceP2P are both set; forceP2P strips TURN servers that forceRelay requires so the connection will fail")
+	}
+
+	if dOpts.webrtcOpts.ForceRelay {
+		logger.Debug("force relay enabled; using relay-only ICE transport policy")
+		config.ICETransportPolicy = webrtc.ICETransportPolicyRelay
+	}
+
+	optionalConfig := configResp.GetConfig()
+	if dOpts.webrtcOpts.ForceP2P {
+		logger.Debug("force P2P enabled; stripping TURN servers and ignoring signaling server ICE config")
+		optionalConfig = nil
+		config.ICEServers = slices.DeleteFunc(slices.Clone(config.ICEServers), iceServerHasTURN)
+	}
+
+	if dOpts.webrtcOpts.ForceP2P && (dOpts.webrtcOpts.TurnURI != "" ||
+		dOpts.webrtcOpts.TurnScheme != "" ||
+		dOpts.webrtcOpts.TurnTransport != "" ||
+		dOpts.webrtcOpts.TurnPort != 0) {
+		logger.Warnw("forceP2P is set alongside TURN options; the TURN filter will have no effect since TURN servers were already stripped")
+	}
+	eWrtcOpts := extendWebRTCConfigOptions{}
+	turnURIInvalid := false
+	if dOpts.webrtcOpts.TurnURI != "" {
+		if parsed, err := stun.ParseURI(dOpts.webrtcOpts.TurnURI); err != nil {
+			logger.Warnw("Failed to parse TurnURI, ignoring all TURN URI options", "uri", dOpts.webrtcOpts.TurnURI)
+			turnURIInvalid = true
+		} else {
+			eWrtcOpts.turnURI = parsed
+		}
+	}
+	if !turnURIInvalid {
+		if dOpts.webrtcOpts.TurnScheme != "" {
+			scheme := stun.NewSchemeType(dOpts.webrtcOpts.TurnScheme)
+			if !slices.Contains(validTurnSchemes, scheme) {
+				logger.Warnw("Unrecognized TurnScheme, ignoring (valid: \"turn\", \"turns\")", "scheme", dOpts.webrtcOpts.TurnScheme)
+			} else {
+				eWrtcOpts.turnScheme = scheme
+			}
+		}
+		if dOpts.webrtcOpts.TurnPort != 0 {
+			eWrtcOpts.turnPort = dOpts.webrtcOpts.TurnPort
+		}
+		switch dOpts.webrtcOpts.TurnTransport {
+		case "", "udp":
+			// default — no override needed
+		case "tcp":
+			eWrtcOpts.replaceUDPWithTCP = true
+		default:
+			logger.Warnw("Unrecognized TurnTransport, ignoring (valid: \"tcp\", \"udp\")", "transport", dOpts.webrtcOpts.TurnTransport)
+		}
+		logger.Debugw("TURN filter options set",
+			"turn_uri", eWrtcOpts.turnURI,
+			"turn_scheme", eWrtcOpts.turnScheme,
+			"turn_port", eWrtcOpts.turnPort,
+			"turn_transport", dOpts.webrtcOpts.TurnTransport,
+		)
+	}
+	extendedConfig := extendWebRTCConfig(logger, &config, optionalConfig, eWrtcOpts)
 	peerConn, dataChannel, err := newPeerConnectionForClient(ctx, extendedConfig, dOpts.webrtcOpts.DisableTrickleICE, logger)
 	if err != nil {
 		return nil, err
@@ -226,10 +311,11 @@ func dialWebRTC(
 
 		var pendingCandidates sync.WaitGroup
 
-		// waitOneHost is closed when the first ICE candidate of type `Host` (e.g: 127.0.0.1) is
-		// found.
-		waitOneHost := make(chan struct{})
-		var waitOneHostOnce sync.Once
+		// waitFirstUsableCandidate is closed when the first usable ICE candidate is found. Under
+		// normal conditions this is a `Host` candidate (e.g: 127.0.0.1). When ForceRelay is set,
+		// pion only gathers relay candidates, so we also accept the first relay candidate.
+		waitFirstUsableCandidate := make(chan struct{})
+		var waitFirstUsableCandidateOnce sync.Once
 		peerConn.OnICECandidate(func(icecandidate *webrtc.ICECandidate) {
 			if exchangeCtx.Err() != nil {
 				// Caller has canceled the dial, or a timeout has occurred.
@@ -242,9 +328,10 @@ func dialWebRTC(
 				// candidate to wait for all other candidates to complete. Thus we only increment
 				// `pendingCandidates` for non-nil values.
 				pendingCandidates.Add(1)
-				if icecandidate.Typ == webrtc.ICECandidateTypeHost {
-					waitOneHostOnce.Do(func() {
-						close(waitOneHost)
+				if icecandidate.Typ == webrtc.ICECandidateTypeHost ||
+					(dOpts.webrtcOpts.ForceRelay && icecandidate.Typ == webrtc.ICECandidateTypeRelay) {
+					waitFirstUsableCandidateOnce.Do(func() {
+						close(waitFirstUsableCandidate)
 					})
 				}
 			}
@@ -303,7 +390,7 @@ func dialWebRTC(
 		case <-exchangeCtx.Done():
 			logger.Errorw("Failed while waiting for first host to be generated", "err", err)
 			return nil, exchangeCtx.Err()
-		case <-waitOneHost:
+		case <-waitFirstUsableCandidate:
 		}
 	}
 
@@ -457,4 +544,15 @@ func dialSignalingServer(
 
 	conn, _, err := dialDirectGRPC(ctx, signalingServer, dOpts, logger)
 	return conn, err
+}
+
+// iceServerHasTURN reports whether any of the ICE server's URLs use a TURN scheme.
+func iceServerHasTURN(s webrtc.ICEServer) bool {
+	for _, rawURL := range s.URLs {
+		uri, err := stun.ParseURI(rawURL)
+		if err == nil && slices.Contains(validTurnSchemes, uri.Scheme) {
+			return true
+		}
+	}
+	return false
 }

@@ -410,6 +410,7 @@ func dialDirectGRPC(ctx context.Context, address string, dOpts dialOptions, logg
 			conn, err := dialer.DialContext(ctx, "tcp", address)
 			if err == nil {
 				// will use TLS
+				logger.Debugw("TLS probe succeeded, using TLS", "address", address)
 				utils.UncheckedError(conn.Close())
 			} else if strings.Contains(err.Error(), "tls: first record does not look like a TLS handshake") {
 				// unfortunately there's no explicit error value for this, so we do a string check
@@ -420,6 +421,8 @@ func dialDirectGRPC(ctx context.Context, address string, dOpts dialOptions, logg
 				} else if hasLocalCreds {
 					return nil, false, ErrInsecureWithCredentials
 				}
+			} else {
+				logger.Debugw("TLS probe failed, using TLS credentials anyway", "address", address, "error", err)
 			}
 		}
 		if downgrade {

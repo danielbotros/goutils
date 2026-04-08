@@ -322,19 +322,44 @@ func listMulticastInterfaces() []net.Interface {
 	return interfaces
 }
 
+func logMulticastInterfaces(logger utils.ZapCompatibleLogger) {
+	allIfaces, err := net.Interfaces()
+	if err != nil {
+		logger.Debugw("listMulticastInterfaces: failed to list interfaces", "error", err)
+		return
+	}
+	for _, ifi := range allIfaces {
+		included := (ifi.Flags&net.FlagUp) != 0 &&
+			((ifi.Flags&net.FlagLoopback) > 0 || (ifi.Flags&net.FlagMulticast) > 0)
+		logger.Debugw("listMulticastInterfaces: interface",
+			"name", ifi.Name,
+			"flags", ifi.Flags.String(),
+			"included", included,
+		)
+	}
+}
+
 // ErrMDNSNoCandidatesFound is returned when a mDNS query fails to find a candidate.
 var ErrMDNSNoCandidatesFound = errors.New("mDNS query failed to find a candidate")
 
 func lookupMDNSCandidate(ctx context.Context, address string, logger utils.ZapCompatibleLogger) (*zeroconf.ServiceEntry, error) {
 	candidates := []string{address, strings.ReplaceAll(address, ".", "-")}
+	logMulticastInterfaces(logger)
+	ifaces := listMulticastInterfaces()
+	ifaceNames := make([]string, 0, len(ifaces))
+	for _, ifc := range ifaces {
+		ifaceNames = append(ifaceNames, fmt.Sprintf("%s(%s)", ifc.Name, ifc.Flags.String()))
+	}
+	logger.Debugw("lookupMDNSCandidate: starting", "address", address, "candidates", candidates, "multicast_ifaces", ifaceNames)
 	// RSDK-8205: logger.Desugar().Sugar() is necessary to massage a ZapCompatibleLogger into a
 	// *zap.SugaredLogger to match zeroconf function signatures.
 	resolver, err := zeroconf.NewResolver(
 		logger.Desugar().Sugar(),
 		zeroconf.SelectIPRecordType(zeroconf.IPv4),
-		zeroconf.SelectIfaces(listMulticastInterfaces()),
+		zeroconf.SelectIfaces(ifaces),
 	)
 	if err != nil {
+		logger.Debugw("lookupMDNSCandidate: failed to create resolver", "error", err)
 		return nil, err
 	}
 	defer resolver.Shutdown()
@@ -342,6 +367,7 @@ func lookupMDNSCandidate(ctx context.Context, address string, logger utils.ZapCo
 		entries := make(chan *zeroconf.ServiceEntry)
 		lookupCtx, cancel := context.WithTimeout(ctx, 1*time.Second)
 		defer cancel()
+		logger.Debugw("lookupMDNSCandidate: querying candidate", "candidate", candidate)
 		if err := resolver.Lookup(lookupCtx, candidate, "_rpc._tcp", "local.", entries); err != nil {
 			logger.Errorw("error performing mDNS query", "error", err)
 			return nil, err
@@ -352,13 +378,23 @@ func lookupMDNSCandidate(ctx context.Context, address string, logger utils.ZapCo
 		// entries gets closed after lookupCtx expires or there is a real entry
 		case entry := <-entries:
 			if entry != nil {
+				logger.Debugw("lookupMDNSCandidate: found entry",
+					"candidate", candidate,
+					"addrIPv4", entry.AddrIPv4,
+					"addrIPv6", entry.AddrIPv6,
+					"port", entry.Port,
+					"text", entry.Text,
+					"hostname", entry.HostName,
+				)
 				return entry, nil
 			}
+			logger.Debugw("lookupMDNSCandidate: candidate timed out with no entry", "candidate", candidate)
 		}
 	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
+	logger.Debugw("lookupMDNSCandidate: no candidates found")
 	return nil, ErrMDNSNoCandidatesFound
 }
 
@@ -370,12 +406,10 @@ func dialMulticastDNS(
 ) (ClientConn, bool, error) {
 	entry, err := lookupMDNSCandidate(ctx, address, logger)
 	if err != nil {
-		if dOpts.debug {
-			logger.Debugw(
-				"failed to find mDNS candidate",
-				"err", err.Error(),
-			)
-		}
+		logger.Debugw(
+			"failed to find mDNS candidate",
+			"err", err.Error(),
+		)
 		return nil, false, err
 	}
 	var hasGRPC, hasWebRTC bool
@@ -388,17 +422,25 @@ func dialMulticastDNS(
 			hasWebRTC = true
 		}
 	}
+	logger.Debugw("dialMulticastDNS: entry found",
+		"service_name", entry.ServiceName(),
+		"addrIPv4", entry.AddrIPv4,
+		"port", entry.Port,
+		"text", entry.Text,
+		"hasGRPC", hasGRPC,
+		"hasWebRTC", hasWebRTC,
+	)
 
 	// IPv6 with scope does not work with grpc-go which we would want here.
 	if !(hasGRPC || hasWebRTC) || len(entry.AddrIPv4) == 0 {
 		errMsg := `mDNS query found a service without an IPv4 address that does not support grpc or webrtc: %q`
+		logger.Debugw("dialMulticastDNS: entry missing IPv4 or no grpc/webrtc support",
+			"addrIPv4_len", len(entry.AddrIPv4), "hasGRPC", hasGRPC, "hasWebRTC", hasWebRTC)
 		return nil, false, fmt.Errorf(errMsg, entry.ServiceName())
 	}
 
 	localAddress := fmt.Sprintf("%s:%d", entry.AddrIPv4[0], entry.Port)
-	if dOpts.debug {
-		logger.Debugw("found address via mDNS", "address", localAddress)
-	}
+	logger.Debugw("found address via mDNS", "address", localAddress)
 
 	// Let downstream calls know when mdns was used. This is helpful to inform
 	// when determining if we want to use the external auth credentials for the signaling

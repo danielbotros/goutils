@@ -513,7 +513,15 @@ func NewServer(logger utils.ZapCompatibleLogger, opts ...ServerOption) (Server, 
 	}
 
 	if !sOpts.disableMDNS {
+		logger.Debugw("mDNS registration starting",
+			"mdns_address", mDNSAddress.String(),
+			"mdns_ip", mDNSAddress.IP.String(),
+			"mdns_port", mDNSAddress.Port,
+			"is_loopback", mDNSAddress.IP.IsLoopback(),
+			"instance_names", instanceNames,
+		)
 		if mDNSAddress.IP.IsLoopback() {
+			logger.Debugw("mDNS taking loopback branch")
 			hostname, err := os.Hostname()
 			if err != nil {
 				return nil, err
@@ -530,6 +538,13 @@ func NewServer(logger utils.ZapCompatibleLogger, opts ...ServerOption) (Server, 
 				loopbackIfaces = append(loopbackIfaces, ifc)
 				break
 			}
+			logger.Debugw("mDNS loopback branch: loopback ifaces", "loopback_ifaces", func() []string {
+				names := make([]string, 0, len(loopbackIfaces))
+				for _, ifc := range loopbackIfaces {
+					names = append(names, ifc.Name)
+				}
+				return names
+			}())
 			for _, host := range instanceNames {
 				hosts := []string{host, strings.ReplaceAll(host, ".", "-")}
 				for _, host := range hosts {
@@ -586,6 +601,11 @@ func NewServer(logger utils.ZapCompatibleLogger, opts ...ServerOption) (Server, 
 				// all of this mimics code in zeroconf.Register, with the change of
 				// using the host as hostname instead of os.Hostname.
 				ifaces := listMulticastInterfaces()
+				ifaceNames := make([]string, 0, len(ifaces))
+				for _, ifc := range ifaces {
+					ifaceNames = append(ifaceNames, fmt.Sprintf("%s(flags=%v)", ifc.Name, ifc.Flags))
+				}
+				logger.Debugw("mDNS non-loopback branch: multicast interfaces", "ifaces", ifaceNames)
 				addrV4 := make([]string, 0)
 				addrV6 := make([]string, 0)
 				for _, iface := range ifaces {
@@ -593,7 +613,9 @@ func NewServer(logger utils.ZapCompatibleLogger, opts ...ServerOption) (Server, 
 					addrV4 = append(addrV4, v4...)
 					addrV6 = append(addrV6, v6...)
 				}
+				logger.Debugw("mDNS non-loopback branch: addresses collected", "addrV4", addrV4, "addrV6", addrV6, "hosts", hosts)
 				for _, host := range hosts {
+					logger.Debugw("mDNS RegisterDynamic attempt", "host", host, "port", mDNSAddress.Port, "services", supportedServices)
 					mdnsServer, err := zeroconf.RegisterDynamic(
 						host,
 						"_rpc._tcp",
@@ -610,6 +632,7 @@ func NewServer(logger utils.ZapCompatibleLogger, opts ...ServerOption) (Server, 
 						sOpts.disableMDNS = true
 						break
 					}
+					logger.Debugw("mDNS RegisterDynamic succeeded", "host", host)
 					server.mdnsServers = append(server.mdnsServers, mdnsServer)
 
 					// register a second address to match queries for machine-name.local
@@ -620,6 +643,7 @@ func NewServer(logger utils.ZapCompatibleLogger, opts ...ServerOption) (Server, 
 						continue
 					}
 
+					logger.Debugw("mDNS RegisterProxy attempt", "host", host, "port", mDNSAddress.Port, "addrV4", addrV4, "addrV6", addrV6)
 					mdnsServer, err = zeroconf.RegisterProxy(
 						host,
 						"_rpc._tcp",
@@ -638,6 +662,7 @@ func NewServer(logger utils.ZapCompatibleLogger, opts ...ServerOption) (Server, 
 						sOpts.disableMDNS = true
 						break
 					}
+					logger.Debugw("mDNS RegisterProxy succeeded", "host", host)
 					server.mdnsServers = append(server.mdnsServers, mdnsServer)
 				}
 			}

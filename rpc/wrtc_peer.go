@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/pion/interceptor"
+	"github.com/pion/logging"
 	"github.com/pion/sctp"
 	"github.com/pion/transport/v2"
 	"github.com/pion/transport/v2/stdnet"
@@ -131,9 +132,15 @@ func newWebRTCAPI(logger utils.ZapCompatibleLogger) (*webrtc.API, error) {
 	}
 
 	options := []func(a *webrtc.API){webrtc.WithMediaEngine(&m), webrtc.WithInterceptorRegistry(&i)}
+	// Match pion's normal logging behavior — its default factory in production, our
+	// structured logger only in debug (as before) — but wrap it to demote the benign,
+	// recurring TURN credential-refresh noise to debug. This is otherwise behavior- and
+	// volume-neutral: every other log passes through to the same factory unchanged.
+	var baseLoggerFactory logging.LoggerFactory = logging.NewDefaultLoggerFactory()
 	if utils.Debug {
-		settingEngine.LoggerFactory = WebRTCLoggerFactory{logger}
+		baseLoggerFactory = WebRTCLoggerFactory{logger}
 	}
+	settingEngine.LoggerFactory = demoteTURNNoiseLoggerFactory{base: baseLoggerFactory}
 	options = append(options, webrtc.WithSettingEngine(settingEngine))
 	return webrtc.NewAPI(options...), nil
 }

@@ -5,6 +5,7 @@ import (
 	"io"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -127,6 +128,19 @@ func dialWebRTC(
 ) (*webrtcClientChannel, error) {
 	dialStart := time.Now()
 
+	// reachedStage tracks the furthest dial checkpoint reached, so a failed dial can report where it
+	// stopped. It is advanced from both this goroutine and the candidate-exchange / ICE callbacks, so
+	// it is an atomic; advance only ever moves it forward.
+	var reachedStage atomic.Int32
+	advance := func(s webrtcpb.DialStage) {
+		for {
+			cur := reachedStage.Load()
+			if int32(s) <= cur || reachedStage.CompareAndSwap(cur, int32(s)) {
+				return
+			}
+		}
+	}
+
 	dialCtx, timeoutCancel := context.WithTimeout(ctx, getDefaultOfferDeadline())
 	defer timeoutCancel()
 
@@ -147,6 +161,7 @@ func dialWebRTC(
 	}()
 
 	logger.Debugw("connected to signaling server", "signaling_server", signalingServer)
+	advance(webrtcpb.DialStage_DIAL_STAGE_SIGNALING_CONNECTED)
 
 	md := metadata.New(map[string]string{RPCHostMetadataField: host})
 	signalCtx := metadata.NewOutgoingContext(dialCtx, md)
@@ -161,6 +176,8 @@ func dialWebRTC(
 		}
 		return nil, err
 	}
+
+	advance(webrtcpb.DialStage_DIAL_STAGE_CONFIG_FETCHED)
 
 	config := DefaultWebRTCConfiguration
 	if dOpts.webrtcOpts.Config != nil {
@@ -238,6 +255,7 @@ func dialWebRTC(
 		maxCallUpdateDuration, totalCallUpdateDuration time.Duration
 	)
 	onICEConnected := func() {
+		advance(webrtcpb.DialStage_DIAL_STAGE_ICE_CONNECTED)
 		// Delay by up to 5s to allow more caller updates/better stats.
 		waitTime := 5 * time.Second
 		if testing.Testing() {
@@ -448,6 +466,7 @@ func dialWebRTC(
 				if err != nil {
 					return err
 				}
+				advance(webrtcpb.DialStage_DIAL_STAGE_ANSWER_RECEIVED)
 				close(remoteDescSet)
 
 				if dOpts.webrtcOpts.DisableTrickleICE {
@@ -487,7 +506,11 @@ func dialWebRTC(
 		sendDone()
 		successful = true
 
-		reportConnectionMetadata(ctx, host, signalingClient, peerConn, logger)
+		transport := webrtcpb.ConnectionTransport_CONNECTION_TRANSPORT_CLOUD_SIGNALED
+		if dOpts.usingMDNS {
+			transport = webrtcpb.ConnectionTransport_CONNECTION_TRANSPORT_MDNS_LOCAL
+		}
+		reportConnectionMetadata(ctx, host, signalingClient, peerConn, transport, dialDurationMS(dialStart), logger)
 
 		// Ensure the exchange goroutine has exited.
 		exchangeCancel(nil)
@@ -504,6 +527,10 @@ func dialWebRTC(
 				logger.Debugw("Problem sending error to signaling server", "err", err)
 			}
 		})
+
+		reportConnectionFailure(ctx, host, signalingClient,
+			webrtcpb.DialStage(reachedStage.Load()), dialDurationMS(dialStart), logger)
+
 		return nil, exchangeErr
 	}
 
@@ -559,15 +586,26 @@ func iceServerHasTURN(s webrtc.ICEServer) bool {
 	return false
 }
 
-// reportConnectionMetadata reports per-side WebRTC connection metadata to the signaling
-// server as a best-effort operation. The local candidate is this dialing SDK; the remote
-// side is the robot. Relay candidates carry their relay server address so the
-// signaling server can classify the relay provider.
+// dialDurationMS returns milliseconds elapsed since start, clamped to a uint32.
+func dialDurationMS(start time.Time) uint32 {
+	ms := time.Since(start).Milliseconds()
+	if ms < 0 {
+		return 0
+	}
+	return uint32(ms)
+}
+
+// reportConnectionMetadata reports metadata about a successful WebRTC dial to the signaling server
+// as a best-effort operation. The local candidate is this dialing SDK; the remote side is the
+// robot. Relay candidates carry their relay server address so the signaling server can classify the
+// relay provider.
 func reportConnectionMetadata(
 	ctx context.Context,
 	host string,
 	signalingClient webrtcpb.SignalingServiceClient,
 	peerConn *webrtc.PeerConnection,
+	transport webrtcpb.ConnectionTransport,
+	durationMS uint32,
 	logger utils.ZapCompatibleLogger,
 ) {
 	localType, localAddr, remoteType, remoteAddr := classifyConnection(peerConn.GetStats())
@@ -577,11 +615,41 @@ func reportConnectionMetadata(
 	reportCtx = metadata.NewOutgoingContext(reportCtx, metadata.New(map[string]string{RPCHostMetadataField: host}))
 
 	if _, err := signalingClient.ReportConnectionMetadata(reportCtx, &webrtcpb.ReportConnectionMetadataRequest{
-		Local:   &webrtcpb.ConnectionCandidate{Type: localType, RelayAddress: localAddr},
-		Remote:  &webrtcpb.ConnectionCandidate{Type: remoteType, RelayAddress: remoteAddr},
-		SdkType: webrtcpb.SDKType_SDK_TYPE_GO,
+		Local:        &webrtcpb.ConnectionCandidate{Type: localType, RelayAddress: localAddr},
+		Remote:       &webrtcpb.ConnectionCandidate{Type: remoteType, RelayAddress: remoteAddr},
+		SdkType:      webrtcpb.SDKType_SDK_TYPE_GO,
+		ReachedStage: webrtcpb.DialStage_DIAL_STAGE_READY,
+		DurationMs:   durationMS,
+		Transport:    transport,
 	}); err != nil {
 		logger.Debugw("failed to report connection metadata", "err", err)
+	}
+}
+
+// reportConnectionFailure reports a best-effort record of a failed WebRTC dial, reusing the
+// ReportConnectionMetadata RPC. It runs on the same signaling channel used for the call exchange, so
+// it covers the useful failure class where signaling worked but the WebRTC connection did not (ICE /
+// TURN / NAT). Failures before the signaling channel is usable are not reported here.
+func reportConnectionFailure(
+	ctx context.Context,
+	host string,
+	signalingClient webrtcpb.SignalingServiceClient,
+	reachedStage webrtcpb.DialStage,
+	durationMS uint32,
+	logger utils.ZapCompatibleLogger,
+) {
+	// Detach from ctx cancellation so a dial that failed *because* ctx was cancelled or timed out can
+	// still report — otherwise we would systematically drop the timeouts we most want to measure.
+	reportCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	reportCtx = metadata.NewOutgoingContext(reportCtx, metadata.New(map[string]string{RPCHostMetadataField: host}))
+
+	if _, err := signalingClient.ReportConnectionMetadata(reportCtx, &webrtcpb.ReportConnectionMetadataRequest{
+		SdkType:      webrtcpb.SDKType_SDK_TYPE_GO,
+		ReachedStage: reachedStage,
+		DurationMs:   durationMS,
+	}); err != nil {
+		logger.Debugw("failed to report connection failure", "err", err)
 	}
 }
 

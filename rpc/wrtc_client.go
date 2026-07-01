@@ -510,7 +510,14 @@ func dialWebRTC(
 		if dOpts.usingMDNS {
 			transport = webrtcpb.ConnectionTransport_CONNECTION_TRANSPORT_MDNS_LOCAL
 		}
-		reportConnectionMetadata(ctx, host, signalingClient, peerConn, transport, dialDurationMS(dialStart), logger)
+		localType, localAddr, remoteType, remoteAddr := classifyConnection(peerConn.GetStats())
+		reportConnectionMetadata(ctx, host, signalingClient, &webrtcpb.ReportConnectionMetadataRequest{
+			Local:        &webrtcpb.ConnectionCandidate{Type: localType, RelayAddress: localAddr},
+			Remote:       &webrtcpb.ConnectionCandidate{Type: remoteType, RelayAddress: remoteAddr},
+			ReachedStage: webrtcpb.DialStage_DIAL_STAGE_READY,
+			DurationMs:   dialDurationMS(dialStart),
+			Transport:    transport,
+		}, logger)
 
 		// Ensure the exchange goroutine has exited.
 		exchangeCancel(nil)
@@ -528,8 +535,10 @@ func dialWebRTC(
 			}
 		})
 
-		reportConnectionFailure(ctx, host, signalingClient,
-			webrtcpb.DialStage(reachedStage.Load()), dialDurationMS(dialStart), logger)
+		reportConnectionMetadata(ctx, host, signalingClient, &webrtcpb.ReportConnectionMetadataRequest{
+			ReachedStage: webrtcpb.DialStage(reachedStage.Load()),
+			DurationMs:   dialDurationMS(dialStart),
+		}, logger)
 
 		return nil, exchangeErr
 	}
@@ -595,61 +604,26 @@ func dialDurationMS(start time.Time) uint32 {
 	return uint32(ms)
 }
 
-// reportConnectionMetadata reports metadata about a successful WebRTC dial to the signaling server
-// as a best-effort operation. The local candidate is this dialing SDK; the remote side is the
-// robot. Relay candidates carry their relay server address so the signaling server can classify the
-// relay provider.
+// reportConnectionMetadata sends a WebRTC dial report to the signaling server, best-effort: errors
+// are logged, never propagated. It stamps the SDK type and host, and detaches from ctx cancellation
+// so a dial that failed because ctx was cancelled or timed out can still report (the 5s timeout
+// still bounds it). The caller builds req: reached_stage == READY denotes success (local/remote and
+// transport populated); any earlier stage denotes a failure that stopped there.
 func reportConnectionMetadata(
 	ctx context.Context,
 	host string,
 	signalingClient webrtcpb.SignalingServiceClient,
-	peerConn *webrtc.PeerConnection,
-	transport webrtcpb.ConnectionTransport,
-	durationMS uint32,
+	req *webrtcpb.ReportConnectionMetadataRequest,
 	logger utils.ZapCompatibleLogger,
 ) {
-	localType, localAddr, remoteType, remoteAddr := classifyConnection(peerConn.GetStats())
+	req.SdkType = webrtcpb.SDKType_SDK_TYPE_GO
 
-	reportCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	reportCtx = metadata.NewOutgoingContext(reportCtx, metadata.New(map[string]string{RPCHostMetadataField: host}))
-
-	if _, err := signalingClient.ReportConnectionMetadata(reportCtx, &webrtcpb.ReportConnectionMetadataRequest{
-		Local:        &webrtcpb.ConnectionCandidate{Type: localType, RelayAddress: localAddr},
-		Remote:       &webrtcpb.ConnectionCandidate{Type: remoteType, RelayAddress: remoteAddr},
-		SdkType:      webrtcpb.SDKType_SDK_TYPE_GO,
-		ReachedStage: webrtcpb.DialStage_DIAL_STAGE_READY,
-		DurationMs:   durationMS,
-		Transport:    transport,
-	}); err != nil {
-		logger.Debugw("failed to report connection metadata", "err", err)
-	}
-}
-
-// reportConnectionFailure reports a best-effort record of a failed WebRTC dial, reusing the
-// ReportConnectionMetadata RPC. It runs on the same signaling channel used for the call exchange, so
-// it covers the useful failure class where signaling worked but the WebRTC connection did not (ICE /
-// TURN / NAT). Failures before the signaling channel is usable are not reported here.
-func reportConnectionFailure(
-	ctx context.Context,
-	host string,
-	signalingClient webrtcpb.SignalingServiceClient,
-	reachedStage webrtcpb.DialStage,
-	durationMS uint32,
-	logger utils.ZapCompatibleLogger,
-) {
-	// Detach from ctx cancellation so a dial that failed *because* ctx was cancelled or timed out can
-	// still report — otherwise we would systematically drop the timeouts we most want to measure.
 	reportCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	reportCtx = metadata.NewOutgoingContext(reportCtx, metadata.New(map[string]string{RPCHostMetadataField: host}))
 
-	if _, err := signalingClient.ReportConnectionMetadata(reportCtx, &webrtcpb.ReportConnectionMetadataRequest{
-		SdkType:      webrtcpb.SDKType_SDK_TYPE_GO,
-		ReachedStage: reachedStage,
-		DurationMs:   durationMS,
-	}); err != nil {
-		logger.Debugw("failed to report connection failure", "err", err)
+	if _, err := signalingClient.ReportConnectionMetadata(reportCtx, req); err != nil {
+		logger.Debugw("failed to report connection metadata", "reached_stage", req.GetReachedStage(), "err", err)
 	}
 }
 

@@ -290,6 +290,10 @@ message ReportConnectionMetadataRequest {
 	uint32 duration_ms = 5;
 	// transport is how a successful connection was established; unset on failure.
 	ConnectionTransport transport = 6;
+	// failure_code is the gRPC status code of the dial failure (google.rpc.Code); set only on
+	// failure. DEADLINE_EXCEEDED (4) is a dial timeout. Success is inferred from reached_stage ==
+	// READY, so no separate outcome field is needed.
+	int32 failure_code = 7;
 }
 
 // ReportConnectionMetadataResponse is empty.

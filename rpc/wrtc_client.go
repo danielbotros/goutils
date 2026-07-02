@@ -510,10 +510,10 @@ func dialWebRTC(
 		if dOpts.usingMDNS {
 			transport = webrtcpb.ConnectionTransport_CONNECTION_TRANSPORT_MDNS_LOCAL
 		}
-		localType, localAddr, remoteType, remoteAddr := classifyConnection(peerConn.GetStats())
+		local, remote := classifyConnection(peerConn.GetStats())
 		reportConnectionMetadata(ctx, host, signalingClient, &webrtcpb.ReportConnectionMetadataRequest{
-			Local:        &webrtcpb.ConnectionCandidate{Type: localType, RelayAddress: localAddr},
-			Remote:       &webrtcpb.ConnectionCandidate{Type: remoteType, RelayAddress: remoteAddr},
+			Local:        local,
+			Remote:       remote,
 			ReachedStage: webrtcpb.DialStage_DIAL_STAGE_READY,
 			DurationMs:   dialDurationMS(dialStart),
 			Transport:    transport,
@@ -538,6 +538,7 @@ func dialWebRTC(
 		reportConnectionMetadata(ctx, host, signalingClient, &webrtcpb.ReportConnectionMetadataRequest{
 			ReachedStage: webrtcpb.DialStage(reachedStage.Load()),
 			DurationMs:   dialDurationMS(dialStart),
+			FailureCode:  int32(status.Code(exchangeErr)),
 		}, logger)
 
 		return nil, exchangeErr
@@ -595,13 +596,9 @@ func iceServerHasTURN(s webrtc.ICEServer) bool {
 	return false
 }
 
-// dialDurationMS returns milliseconds elapsed since start, clamped to a uint32.
+// dialDurationMS returns milliseconds elapsed since start (monotonic, so always non-negative).
 func dialDurationMS(start time.Time) uint32 {
-	ms := time.Since(start).Milliseconds()
-	if ms < 0 {
-		return 0
-	}
-	return uint32(ms)
+	return uint32(time.Since(start).Milliseconds())
 }
 
 // reportConnectionMetadata sends a WebRTC dial report to the signaling server, best-effort: errors
@@ -627,45 +624,37 @@ func reportConnectionMetadata(
 	}
 }
 
-// classifyConnection inspects the nominated ICE candidate pair and classifies each side's
-// candidate type and, for relay candidates, also returns the relayed transport address.
-func classifyConnection(stats webrtc.StatsReport) (
-	localType webrtcpb.ICECandidateType, localAddr string,
-	remoteType webrtcpb.ICECandidateType, remoteAddr string,
-) {
+// classifyConnection inspects the nominated ICE candidate pair and classifies each side into a
+// ConnectionCandidate. Both are UNSPECIFIED when no succeeded, nominated pair exists.
+func classifyConnection(stats webrtc.StatsReport) (local, remote *webrtcpb.ConnectionCandidate) {
 	var localCandID, remoteCandID string
 	for _, stat := range stats {
 		pair, ok := stat.(webrtc.ICECandidatePairStats)
 		if !ok || !pair.Nominated || pair.State != webrtc.StatsICECandidatePairStateSucceeded {
 			continue
 		}
-		localCandID = pair.LocalCandidateID
-		remoteCandID = pair.RemoteCandidateID
+		localCandID, remoteCandID = pair.LocalCandidateID, pair.RemoteCandidateID
 		break
 	}
 
-	localType, localAddr = classifyCandidate(stats, localCandID)
-	remoteType, remoteAddr = classifyCandidate(stats, remoteCandID)
-	return localType, localAddr, remoteType, remoteAddr
+	return classifyCandidate(stats, localCandID), classifyCandidate(stats, remoteCandID)
 }
 
-// classifyCandidate maps a single ICE candidate to an ICE candidate type and, for relay
-// candidates, also returns the relayed transport address.
-func classifyCandidate(stats webrtc.StatsReport, candID string) (webrtcpb.ICECandidateType, string) {
-	if candID == "" {
-		return webrtcpb.ICECandidateType_ICE_CANDIDATE_TYPE_UNSPECIFIED, ""
-	}
+// classifyCandidate maps a single ICE candidate stat to a ConnectionCandidate; a missing or
+// unrecognized candidate yields the zero value (type UNSPECIFIED). Relay candidates carry the
+// relayed transport address so the signaling server can classify the relay provider.
+func classifyCandidate(stats webrtc.StatsReport, candID string) *webrtcpb.ConnectionCandidate {
 	cand, ok := stats[candID].(webrtc.ICECandidateStats)
 	if !ok {
-		return webrtcpb.ICECandidateType_ICE_CANDIDATE_TYPE_UNSPECIFIED, ""
+		return &webrtcpb.ConnectionCandidate{}
 	}
 	switch cand.CandidateType {
 	case webrtc.ICECandidateTypeHost:
-		return webrtcpb.ICECandidateType_ICE_CANDIDATE_TYPE_HOST, ""
+		return &webrtcpb.ConnectionCandidate{Type: webrtcpb.ICECandidateType_ICE_CANDIDATE_TYPE_HOST}
 	case webrtc.ICECandidateTypeSrflx, webrtc.ICECandidateTypePrflx:
-		return webrtcpb.ICECandidateType_ICE_CANDIDATE_TYPE_STUN, ""
+		return &webrtcpb.ConnectionCandidate{Type: webrtcpb.ICECandidateType_ICE_CANDIDATE_TYPE_STUN}
 	case webrtc.ICECandidateTypeRelay:
-		return webrtcpb.ICECandidateType_ICE_CANDIDATE_TYPE_RELAY, cand.IP
+		return &webrtcpb.ConnectionCandidate{Type: webrtcpb.ICECandidateType_ICE_CANDIDATE_TYPE_RELAY, RelayAddress: cand.IP}
 	}
-	return webrtcpb.ICECandidateType_ICE_CANDIDATE_TYPE_UNSPECIFIED, ""
+	return &webrtcpb.ConnectionCandidate{}
 }

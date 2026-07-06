@@ -127,7 +127,7 @@ func dialWebRTC(
 	host string,
 	dOpts dialOptions,
 	logger utils.ZapCompatibleLogger,
-) (*webrtcClientChannel, error) {
+) (retCh *webrtcClientChannel, retErr error) {
 	dialStart := time.Now()
 
 	// reachedStage tracks the furthest dial checkpoint reached, so a failed dial can report where it
@@ -169,6 +169,23 @@ func dialWebRTC(
 	signalCtx := metadata.NewOutgoingContext(dialCtx, md)
 
 	signalingClient := webrtcpb.NewSignalingServiceClient(conn)
+
+	// Now that the signaling channel exists, report any dial failure from here on, tagged with the
+	// furthest stage reached, so the app sees where a failed dial stopped. Registered before the first
+	// post-signaling failure (OptionalWebRTCConfig) so even that reports SIGNALING_CONNECTED. Failures
+	// before this point have no channel to report over. Success reports READY itself; the fall-back
+	// ErrNoWebRTCSignaler is expected control flow, not a WebRTC failure, so it is skipped.
+	defer func() {
+		if retErr == nil || errors.Is(retErr, ErrNoWebRTCSignaler) {
+			return
+		}
+		reportConnectionMetadata(ctx, host, signalingClient, &webrtcpb.ReportConnectionMetadataRequest{
+			ReachedStage: webrtcpb.DialStage(reachedStage.Load()),
+			DurationMs:   dialDurationMS(dialStart),
+			FailureCode:  int32(status.Code(retErr)),
+		}, logger)
+	}()
+
 	configResp, err := signalingClient.OptionalWebRTCConfig(signalCtx, &webrtcpb.OptionalWebRTCConfigRequest{})
 	if err != nil {
 		// this would be where we would hit an unimplemented signaler error first.
@@ -537,12 +554,7 @@ func dialWebRTC(
 			}
 		})
 
-		reportConnectionMetadata(ctx, host, signalingClient, &webrtcpb.ReportConnectionMetadataRequest{
-			ReachedStage: webrtcpb.DialStage(reachedStage.Load()),
-			DurationMs:   dialDurationMS(dialStart),
-			FailureCode:  int32(status.Code(exchangeErr)),
-		}, logger)
-
+		// Failure reporting is handled by the deferred reporter (keyed on the returned error).
 		return nil, exchangeErr
 	}
 

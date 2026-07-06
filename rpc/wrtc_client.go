@@ -4,7 +4,6 @@ import (
 	"context"
 	"io"
 	"net"
-	"runtime"
 	"runtime/debug"
 	"slices"
 	"strings"
@@ -637,7 +636,6 @@ func reportConnectionMetadata(
 ) {
 	req.SdkType = webrtcpb.SDKType_SDK_TYPE_GO
 	req.SdkVersion = sdkVersion()
-	req.Platform = runtime.GOOS + "/" + runtime.GOARCH
 
 	reportCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()

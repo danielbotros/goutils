@@ -300,9 +300,6 @@ message ReportConnectionMetadataRequest {
 	// sdk_version is the version of the dialing SDK (e.g. a semver or git tag). Reported so failure
 	// spikes can be attributed to a specific SDK release. Bounded-ish cardinality (releases in use).
 	string sdk_version = 8;
-	// platform identifies where the SDK is running (e.g. "linux/arm64", "browser", "nodejs",
-	// "darwin/amd64"). A small, bounded set; helps triage failures by environment.
-	string platform = 9;
 }
 
 // ReportConnectionMetadataResponse is empty.

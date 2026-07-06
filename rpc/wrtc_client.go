@@ -3,6 +3,8 @@ package rpc
 import (
 	"context"
 	"io"
+	"runtime"
+	"runtime/debug"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -606,6 +608,15 @@ func dialDurationMS(start time.Time) uint32 {
 // so a dial that failed because ctx was cancelled or timed out can still report (the 5s timeout
 // still bounds it). The caller builds req: reached_stage == READY denotes success (local/remote and
 // transport populated); any earlier stage denotes a failure that stopped there.
+// sdkVersion returns the version of the main module consuming this SDK (best-effort). Empty when
+// built without module info (e.g. `go run` on a throwaway module).
+func sdkVersion() string {
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" {
+		return bi.Main.Version
+	}
+	return ""
+}
+
 func reportConnectionMetadata(
 	ctx context.Context,
 	host string,
@@ -614,6 +625,8 @@ func reportConnectionMetadata(
 	logger utils.ZapCompatibleLogger,
 ) {
 	req.SdkType = webrtcpb.SDKType_SDK_TYPE_GO
+	req.SdkVersion = sdkVersion()
+	req.Platform = runtime.GOOS + "/" + runtime.GOARCH
 
 	reportCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()

@@ -184,7 +184,7 @@ func dialWebRTC(
 		reportConnectionMetadata(ctx, host, signalingClient, &webrtcpb.ReportConnectionMetadataRequest{
 			ReachedStage: webrtcpb.DialStage(reachedStage.Load()),
 			DurationMs:   dialDurationMS(dialStart),
-			FailureCode:  int32(status.Code(retErr)),
+			FailureCode:  status.Code(retErr).String(),
 		}, logger)
 	}()
 

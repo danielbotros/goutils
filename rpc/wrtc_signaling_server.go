@@ -18,7 +18,40 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"go.viam.com/utils"
+	"go.viam.com/utils/perf/statz"
+	"go.viam.com/utils/perf/statz/units"
 	webrtcpb "go.viam.com/utils/proto/rpc/webrtc/v1"
+)
+
+// Connection-metadata counters recorded by the base signaling server's ReportConnectionMetadata.
+// Named "webrtc/..." (not "signaling/...") to avoid colliding with the app's own per-org counters
+// when both register in the same binary. Unlike the app wrapper, the base server has no org context
+// or coturn-address knowledge, so it records raw candidate types (no coturn/twilio provider split).
+var (
+	reportedConnectionSDKType = statz.NewCounter1[string]("webrtc/connection_sdk_type",
+		statz.MetricConfig{
+			Description: "SDK type reported for WebRTC connections signaled through this server",
+			Unit:        units.Dimensionless,
+			Labels:      []statz.Label{{Name: "sdk_type", Description: "go, typescript, or python_cpp"}},
+		})
+	reportedConnectionCandidateType = statz.NewCounter2[string, string]("webrtc/connection_candidate_type",
+		statz.MetricConfig{
+			Description: "ICE candidate type reported for WebRTC connections, per side (raw, no provider split)",
+			Unit:        units.Dimensionless,
+			Labels: []statz.Label{
+				{Name: "side", Description: "local (dialing SDK) or remote"},
+				{Name: "candidate_type", Description: "host, stun, relay, or unspecified"},
+			},
+		})
+	reportedConnectionReachedStage = statz.NewCounter2[string, string]("webrtc/connection_reached_stage",
+		statz.MetricConfig{
+			Description: "Furthest dial stage reached, per SDK (READY == success; earlier == failure floor)",
+			Unit:        units.Dimensionless,
+			Labels: []statz.Label{
+				{Name: "sdk_type", Description: "go, typescript, or python_cpp"},
+				{Name: "reached_stage", Description: "the furthest DialStage reached"},
+			},
+		})
 )
 
 // A WebRTCSignalingServer implements a signaling service for WebRTC by exchanging
@@ -568,6 +601,40 @@ func (srv *WebRTCSignalingServer) OptionalWebRTCConfig(
 	return &webrtcpb.OptionalWebRTCConfigResponse{Config: &webrtcpb.WebRTCConfig{
 		AdditionalIceServers: iceServers,
 	}}, nil
+}
+
+// ReportConnectionMetadata records best-effort connection metadata reported by a dialing client.
+// The app wraps this service with its own richer, per-org, coturn-aware handler; this base
+// implementation exists so connections that signal through a machine's own signaling server (mDNS /
+// LAN — which never reach the cloud app) are still recorded, via the machine's telemetry. It has no
+// org context or coturn-address knowledge, so it records the raw reported candidate types.
+func (srv *WebRTCSignalingServer) ReportConnectionMetadata(
+	ctx context.Context,
+	req *webrtcpb.ReportConnectionMetadataRequest,
+) (*webrtcpb.ReportConnectionMetadataResponse, error) {
+	_, span := trace.StartSpan(ctx, "SignalingServer::ReportConnectionMetadata")
+	defer span.End()
+
+	sdk := req.GetSdkType().String()
+	reportedConnectionSDKType.Inc(sdk)
+	reportedConnectionCandidateType.Inc("local", reportedCandidateTypeLabel(req.GetLocal().GetType()))
+	reportedConnectionCandidateType.Inc("remote", reportedCandidateTypeLabel(req.GetRemote().GetType()))
+	reportedConnectionReachedStage.Inc(sdk, req.GetReachedStage().String())
+	return &webrtcpb.ReportConnectionMetadataResponse{}, nil
+}
+
+// reportedCandidateTypeLabel maps a reported ICE candidate type to a bounded metric label.
+func reportedCandidateTypeLabel(t webrtcpb.ICECandidateType) string {
+	switch t {
+	case webrtcpb.ICECandidateType_ICE_CANDIDATE_TYPE_HOST:
+		return "host"
+	case webrtcpb.ICECandidateType_ICE_CANDIDATE_TYPE_STUN:
+		return "stun"
+	case webrtcpb.ICECandidateType_ICE_CANDIDATE_TYPE_RELAY:
+		return "relay"
+	default:
+		return "unspecified"
+	}
 }
 
 // Close cancels all active workers and waits to cleanly close all background workers.

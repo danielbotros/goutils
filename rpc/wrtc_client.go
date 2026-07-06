@@ -3,9 +3,11 @@ package rpc
 import (
 	"context"
 	"io"
+	"net"
 	"runtime"
 	"runtime/debug"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -525,10 +527,7 @@ func dialWebRTC(
 		sendDone()
 		successful = true
 
-		transport := webrtcpb.ConnectionTransport_CONNECTION_TRANSPORT_CLOUD_SIGNALED
-		if dOpts.usingMDNS {
-			transport = webrtcpb.ConnectionTransport_CONNECTION_TRANSPORT_MDNS_LOCAL
-		}
+		transport := classifyTransport(signalingServer, dOpts.usingMDNS)
 		local, remote := classifyConnection(peerConn.GetStats())
 		reportConnectionMetadata(ctx, host, signalingClient, &webrtcpb.ReportConnectionMetadataRequest{
 			Local:        local,
@@ -647,6 +646,33 @@ func reportConnectionMetadata(
 	if _, err := signalingClient.ReportConnectionMetadata(reportCtx, req); err != nil {
 		logger.Debugw("failed to report connection metadata", "reached_stage", req.GetReachedStage(), "err", err)
 	}
+}
+
+// classifyTransport derives how a connection was signaled from the signaling address, best-effort
+// and without a DNS lookup: mDNS discovery -> MDNS_LOCAL; a loopback/private/link-local address ->
+// LOCAL (a machine's own or a self-hosted signaler); anything else (a public/remote host) ->
+// CLOUD_SIGNALED.
+func classifyTransport(signalingAddress string, usingMDNS bool) webrtcpb.ConnectionTransport {
+	if usingMDNS {
+		return webrtcpb.ConnectionTransport_CONNECTION_TRANSPORT_MDNS_LOCAL
+	}
+	host := signalingAddress
+	if i := strings.Index(host, "://"); i >= 0 {
+		host = host[i+3:]
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+			return webrtcpb.ConnectionTransport_CONNECTION_TRANSPORT_LOCAL
+		}
+		return webrtcpb.ConnectionTransport_CONNECTION_TRANSPORT_CLOUD_SIGNALED
+	}
+	if host == "localhost" || strings.Contains(host, ".local") {
+		return webrtcpb.ConnectionTransport_CONNECTION_TRANSPORT_LOCAL
+	}
+	return webrtcpb.ConnectionTransport_CONNECTION_TRANSPORT_CLOUD_SIGNALED
 }
 
 // classifyConnection inspects the nominated ICE candidate pair and classifies each side into a

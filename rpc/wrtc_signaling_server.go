@@ -71,10 +71,27 @@ type WebRTCSignalingServer struct {
 
 	bgWorkers *utils.StoppableWorkers
 
+	// connMetadataForwarder, if set, ships reported connection metadata to an upstream sink (the
+	// cloud app). Set by consumers that run this server locally (e.g. a machine's own signaling
+	// server) so their local/mDNS connections still land in the cloud's per-org metrics. nil = off.
+	connMetadataForwarder ConnectionMetadataForwarder
+
 	logger utils.ZapCompatibleLogger
 
 	// Interval at which to send heartbeats.
 	heartbeatInterval time.Duration
+}
+
+// ConnectionMetadataForwarder ships a client-reported connection-metadata request upstream (e.g. to
+// the cloud app over a machine's existing app connection), so a connection signaled through a
+// machine-local signaling server is still recorded in the upstream's per-org metrics. host is the
+// reporting rpc-host (the machine's own FQDN); implementations should authenticate as that host.
+// Called on a background worker; implementations should be best-effort and non-blocking-ish.
+type ConnectionMetadataForwarder func(ctx context.Context, host string, req *webrtcpb.ReportConnectionMetadataRequest)
+
+// SetConnectionMetadataForwarder sets the optional upstream forwarder (see ConnectionMetadataForwarder).
+func (srv *WebRTCSignalingServer) SetConnectionMetadataForwarder(f ConnectionMetadataForwarder) {
+	srv.connMetadataForwarder = f
 }
 
 // NewWebRTCSignalingServer makes a new signaling server that uses the given
@@ -620,8 +637,43 @@ func (srv *WebRTCSignalingServer) ReportConnectionMetadata(
 	reportedConnectionCandidateType.Inc("local", reportedCandidateTypeLabel(req.GetLocal().GetType()))
 	reportedConnectionCandidateType.Inc("remote", reportedCandidateTypeLabel(req.GetRemote().GetType()))
 	reportedConnectionReachedStage.Inc(sdk, req.GetReachedStage().String())
+
+	// Optionally forward upstream so machine-local connections also appear in the cloud's per-org
+	// metrics. No double-counting: a connection reports to exactly one signaling server, and only
+	// machine-signaled ones are forwarded; the app tells forwarded from direct apart via transport
+	// (LOCAL/MDNS_LOCAL vs CLOUD_SIGNALED). Done on a background worker so the client's report
+	// returns immediately.
+	if fwd := srv.connMetadataForwarder; fwd != nil {
+		host := ""
+		if hosts, err := HostsFromCtx(ctx); err == nil && len(hosts) > 0 {
+			host = hosts[0]
+		}
+		srv.bgWorkers.Add(func(bgCtx context.Context) { fwd(bgCtx, host, req) })
+	}
 	return &webrtcpb.ReportConnectionMetadataResponse{}, nil
 }
+
+// --- RDK wiring sketch (lives in rdk, not goutils; shown here for the design discussion) ---------
+//
+// When RDK constructs a machine's internal signaling server, wire a forwarder that reuses the
+// machine's existing global app connection (rdk grpc/app_conn.go) to re-send the report to the
+// cloud app, authenticated as the machine:
+//
+//   sigServer := rpc.NewWebRTCSignalingServer(callQueue, cfgProvider, logger, hb, hosts...)
+//   sigServer.SetConnectionMetadataForwarder(func(ctx context.Context, host string, req *webrtcpb.ReportConnectionMetadataRequest) {
+//       appConn := robot.appConn // persistent authed conn to app.viam.com
+//       if appConn == nil { return }
+//       ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+//       defer cancel()
+//       ctx = metadata.NewOutgoingContext(ctx, metadata.New(map[string]string{rpc.RPCHostMetadataField: host}))
+//       if _, err := webrtcpb.NewSignalingServiceClient(appConn).ReportConnectionMetadata(ctx, req); err != nil {
+//           logger.Debugw("failed to forward connection metadata to app", "err", err)
+//       }
+//   })
+//
+// The app's ReportConnectionMetadata resolves the org from the rpc-host (the machine's FQDN), so
+// the machine authorizes for its own host. Future: batch/coalesce forwards if per-connection
+// chatter is a concern on busy machines.
 
 // reportedCandidateTypeLabel maps a reported ICE candidate type to a bounded metric label.
 func reportedCandidateTypeLabel(t webrtcpb.ICECandidateType) string {

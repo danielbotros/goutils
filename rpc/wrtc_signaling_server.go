@@ -18,7 +18,40 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"go.viam.com/utils"
+	"go.viam.com/utils/perf/statz"
+	"go.viam.com/utils/perf/statz/units"
 	webrtcpb "go.viam.com/utils/proto/rpc/webrtc/v1"
+)
+
+// Connection-metadata counters recorded by the base signaling server's ReportConnectionMetadata.
+// Named "webrtc/..." (not "signaling/...") to avoid colliding with the app's own per-org counters
+// when both register in the same binary. Unlike the app wrapper, the base server has no org context
+// or coturn-address knowledge, so it records raw candidate types (no coturn/twilio provider split).
+var (
+	reportedConnectionSDKType = statz.NewCounter1[string]("webrtc/connection_sdk_type",
+		statz.MetricConfig{
+			Description: "SDK type reported for WebRTC connections signaled through this server",
+			Unit:        units.Dimensionless,
+			Labels:      []statz.Label{{Name: "sdk_type", Description: "go, typescript, or python_cpp"}},
+		})
+	reportedConnectionCandidateType = statz.NewCounter2[string, string]("webrtc/connection_candidate_type",
+		statz.MetricConfig{
+			Description: "ICE candidate type reported for WebRTC connections, per side (raw, no provider split)",
+			Unit:        units.Dimensionless,
+			Labels: []statz.Label{
+				{Name: "side", Description: "local (dialing SDK) or remote"},
+				{Name: "candidate_type", Description: "host, stun, relay, or unspecified"},
+			},
+		})
+	reportedConnectionReachedStage = statz.NewCounter2[string, string]("webrtc/connection_reached_stage",
+		statz.MetricConfig{
+			Description: "Furthest dial stage reached, per SDK (READY == success; earlier == failure floor)",
+			Unit:        units.Dimensionless,
+			Labels: []statz.Label{
+				{Name: "sdk_type", Description: "go, typescript, or python_cpp"},
+				{Name: "reached_stage", Description: "the furthest DialStage reached"},
+			},
+		})
 )
 
 // A WebRTCSignalingServer implements a signaling service for WebRTC by exchanging
@@ -38,10 +71,27 @@ type WebRTCSignalingServer struct {
 
 	bgWorkers *utils.StoppableWorkers
 
+	// connMetadataForwarder, if set, ships reported connection metadata to an upstream sink (the
+	// cloud app). Set by consumers that run this server locally (e.g. a machine's own signaling
+	// server) so their local/mDNS connections still land in the cloud's per-org metrics. nil = off.
+	connMetadataForwarder ConnectionMetadataForwarder
+
 	logger utils.ZapCompatibleLogger
 
 	// Interval at which to send heartbeats.
 	heartbeatInterval time.Duration
+}
+
+// ConnectionMetadataForwarder ships a client-reported connection-metadata request upstream (e.g. to
+// the cloud app over a machine's existing app connection), so a connection signaled through a
+// machine-local signaling server is still recorded in the upstream's per-org metrics. host is the
+// reporting rpc-host (the machine's own FQDN); implementations should authenticate as that host.
+// Called on a background worker; implementations should be best-effort and non-blocking-ish.
+type ConnectionMetadataForwarder func(ctx context.Context, host string, req *webrtcpb.ReportConnectionMetadataRequest)
+
+// SetConnectionMetadataForwarder sets the optional upstream forwarder (see ConnectionMetadataForwarder).
+func (srv *WebRTCSignalingServer) SetConnectionMetadataForwarder(f ConnectionMetadataForwarder) {
+	srv.connMetadataForwarder = f
 }
 
 // NewWebRTCSignalingServer makes a new signaling server that uses the given
@@ -568,6 +618,75 @@ func (srv *WebRTCSignalingServer) OptionalWebRTCConfig(
 	return &webrtcpb.OptionalWebRTCConfigResponse{Config: &webrtcpb.WebRTCConfig{
 		AdditionalIceServers: iceServers,
 	}}, nil
+}
+
+// ReportConnectionMetadata records best-effort connection metadata reported by a dialing client.
+// The app wraps this service with its own richer, per-org, coturn-aware handler; this base
+// implementation exists so connections that signal through a machine's own signaling server (mDNS /
+// LAN — which never reach the cloud app) are still recorded, via the machine's telemetry. It has no
+// org context or coturn-address knowledge, so it records the raw reported candidate types.
+func (srv *WebRTCSignalingServer) ReportConnectionMetadata(
+	ctx context.Context,
+	req *webrtcpb.ReportConnectionMetadataRequest,
+) (*webrtcpb.ReportConnectionMetadataResponse, error) {
+	_, span := trace.StartSpan(ctx, "SignalingServer::ReportConnectionMetadata")
+	defer span.End()
+
+	sdk := req.GetSdkType().String()
+	reportedConnectionSDKType.Inc(sdk)
+	reportedConnectionCandidateType.Inc("local", reportedCandidateTypeLabel(req.GetLocal().GetType()))
+	reportedConnectionCandidateType.Inc("remote", reportedCandidateTypeLabel(req.GetRemote().GetType()))
+	reportedConnectionReachedStage.Inc(sdk, req.GetReachedStage().String())
+
+	// Optionally forward upstream so machine-local connections also appear in the cloud's per-org
+	// metrics. No double-counting: a connection reports to exactly one signaling server, and only
+	// machine-signaled ones are forwarded; the app tells forwarded from direct apart via transport
+	// (LOCAL/MDNS_LOCAL vs CLOUD_SIGNALED). Done on a background worker so the client's report
+	// returns immediately.
+	if fwd := srv.connMetadataForwarder; fwd != nil {
+		host := ""
+		if hosts, err := HostsFromCtx(ctx); err == nil && len(hosts) > 0 {
+			host = hosts[0]
+		}
+		srv.bgWorkers.Add(func(bgCtx context.Context) { fwd(bgCtx, host, req) })
+	}
+	return &webrtcpb.ReportConnectionMetadataResponse{}, nil
+}
+
+// --- RDK wiring sketch (lives in rdk, not goutils; shown here for the design discussion) ---------
+//
+// When RDK constructs a machine's internal signaling server, wire a forwarder that reuses the
+// machine's existing global app connection (rdk grpc/app_conn.go) to re-send the report to the
+// cloud app, authenticated as the machine:
+//
+//   sigServer := rpc.NewWebRTCSignalingServer(callQueue, cfgProvider, logger, hb, hosts...)
+//   sigServer.SetConnectionMetadataForwarder(func(ctx context.Context, host string, req *webrtcpb.ReportConnectionMetadataRequest) {
+//       appConn := robot.appConn // persistent authed conn to app.viam.com
+//       if appConn == nil { return }
+//       ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+//       defer cancel()
+//       ctx = metadata.NewOutgoingContext(ctx, metadata.New(map[string]string{rpc.RPCHostMetadataField: host}))
+//       if _, err := webrtcpb.NewSignalingServiceClient(appConn).ReportConnectionMetadata(ctx, req); err != nil {
+//           logger.Debugw("failed to forward connection metadata to app", "err", err)
+//       }
+//   })
+//
+// The app's ReportConnectionMetadata resolves the org from the rpc-host (the machine's FQDN), so
+// the machine authorizes for its own host. Future: batch/coalesce forwards if per-connection
+// chatter is a concern on busy machines.
+
+// reportedCandidateTypeLabel maps a reported ICE candidate type to a bounded metric label.
+func reportedCandidateTypeLabel(t webrtcpb.ICECandidateType) string {
+	switch t {
+	case webrtcpb.ICECandidateType_ICE_CANDIDATE_TYPE_HOST:
+		return "host"
+	case webrtcpb.ICECandidateType_ICE_CANDIDATE_TYPE_STUN:
+		return "stun"
+	case webrtcpb.ICECandidateType_ICE_CANDIDATE_TYPE_RELAY:
+		return "relay"
+	default:
+		return "unspecified"
+	}
 }
 
 // Close cancels all active workers and waits to cleanly close all background workers.

@@ -249,12 +249,63 @@ message ConnectionCandidate {
 	string relay_address = 2;
 }
 
-// ReportConnectionMetadataRequest reports metadata about an established WebRTC connection, per
-// side: local is the dialing SDK and server is the robot.
+// DialStage is the furthest checkpoint a WebRTC dial reached. READY means the dial succeeded; any
+// earlier value is the stage at which a failed dial stopped. The dialing SDK tracks this exactly as
+// it advances through the dial, so it is not inferred after the fact.
+enum DialStage {
+	DIAL_STAGE_UNSPECIFIED = 0;
+	// DIAL_STAGE_SIGNALING_CONNECTED: the signaling channel was established.
+	DIAL_STAGE_SIGNALING_CONNECTED = 1;
+	// DIAL_STAGE_CONFIG_FETCHED: ICE/TURN configuration was fetched from the signaling server.
+	DIAL_STAGE_CONFIG_FETCHED = 2;
+	// DIAL_STAGE_OFFER_SENT: the SDP offer was sent to the signaling server (the Call was accepted).
+	// A failure here means the offer/Call itself failed; ANSWER_RECEIVED means the answerer replied.
+	DIAL_STAGE_OFFER_SENT = 3;
+	// DIAL_STAGE_ANSWER_RECEIVED: the answerer's SDP answer was received and applied.
+	DIAL_STAGE_ANSWER_RECEIVED = 4;
+	// DIAL_STAGE_ICE_CONNECTED: ICE connectivity was established (a candidate pair connected).
+	DIAL_STAGE_ICE_CONNECTED = 5;
+	// DIAL_STAGE_DTLS_CONNECTED: the DTLS handshake completed (peer connection connected) but the
+	// data channel is not yet open. Separates DTLS/cert failures from data-channel failures.
+	DIAL_STAGE_DTLS_CONNECTED = 6;
+	// DIAL_STAGE_READY: the connection is fully ready (data channel open). This is success.
+	DIAL_STAGE_READY = 7;
+}
+
+// ConnectionTransport is how a successful WebRTC connection was signaled, derived from the
+// signaling address (best-effort, no DNS lookup). Set only on success (reached_stage == READY).
+enum ConnectionTransport {
+	CONNECTION_TRANSPORT_UNSPECIFIED = 0;
+	// CONNECTION_TRANSPORT_CLOUD_SIGNALED: signaled through a remote/public signaling server (the cloud app).
+	CONNECTION_TRANSPORT_CLOUD_SIGNALED = 1;
+	// CONNECTION_TRANSPORT_MDNS_LOCAL: signaled over an mDNS-discovered local-network path.
+	CONNECTION_TRANSPORT_MDNS_LOCAL = 2;
+	// CONNECTION_TRANSPORT_LOCAL: signaled through a loopback/private-address signaling server
+	// (e.g. a machine's own signaling server or a self-hosted signaler) without mDNS discovery.
+	CONNECTION_TRANSPORT_LOCAL = 3;
+}
+
+// ReportConnectionMetadataRequest reports metadata about a WebRTC dial, per side: local is the
+// dialing SDK and remote is the robot.
 message ReportConnectionMetadataRequest {
 	ConnectionCandidate local = 1;
 	ConnectionCandidate remote = 2;
 	SDKType sdk_type = 3;
+	// reached_stage is the furthest dial checkpoint reached. READY indicates success; any earlier
+	// value is where a failed dial stopped. local and remote are set only when reached_stage == READY.
+	DialStage reached_stage = 4;
+	// duration_ms is the wall-clock time from dial start to connection ready (on success) or to the
+	// failure (on failure).
+	uint32 duration_ms = 5;
+	// transport is how a successful connection was established; unset on failure.
+	ConnectionTransport transport = 6;
+	// failure_code is the gRPC status code name of the dial failure (e.g. "DeadlineExceeded" for a
+	// dial timeout, "Unauthenticated", "Unavailable"); set only on failure. A bounded set, suitable
+	// as a metric label. Success is inferred from reached_stage == READY, so no outcome field needed.
+	string failure_code = 7;
+	// sdk_version is the version of the dialing SDK (e.g. a semver or git tag). Reported so failure
+	// spikes can be attributed to a specific SDK release. Bounded-ish cardinality (releases in use).
+	string sdk_version = 8;
 }
 
 // ReportConnectionMetadataResponse is empty.

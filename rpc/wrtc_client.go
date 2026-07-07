@@ -3,8 +3,12 @@ package rpc
 import (
 	"context"
 	"io"
+	"net"
+	"runtime/debug"
 	"slices"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -124,8 +128,21 @@ func dialWebRTC(
 	host string,
 	dOpts dialOptions,
 	logger utils.ZapCompatibleLogger,
-) (*webrtcClientChannel, error) {
+) (retCh *webrtcClientChannel, retErr error) {
 	dialStart := time.Now()
+
+	// reachedStage tracks the furthest dial checkpoint reached, so a failed dial can report where it
+	// stopped. It is advanced from both this goroutine and the candidate-exchange / ICE callbacks, so
+	// it is an atomic; advance only ever moves it forward.
+	var reachedStage atomic.Int32
+	advance := func(s webrtcpb.DialStage) {
+		for {
+			cur := reachedStage.Load()
+			if int32(s) <= cur || reachedStage.CompareAndSwap(cur, int32(s)) {
+				return
+			}
+		}
+	}
 
 	dialCtx, timeoutCancel := context.WithTimeout(ctx, getDefaultOfferDeadline())
 	defer timeoutCancel()
@@ -147,11 +164,29 @@ func dialWebRTC(
 	}()
 
 	logger.Debugw("connected to signaling server", "signaling_server", signalingServer)
+	advance(webrtcpb.DialStage_DIAL_STAGE_SIGNALING_CONNECTED)
 
 	md := metadata.New(map[string]string{RPCHostMetadataField: host})
 	signalCtx := metadata.NewOutgoingContext(dialCtx, md)
 
 	signalingClient := webrtcpb.NewSignalingServiceClient(conn)
+
+	// Now that the signaling channel exists, report any dial failure from here on, tagged with the
+	// furthest stage reached, so the app sees where a failed dial stopped. Registered before the first
+	// post-signaling failure (OptionalWebRTCConfig) so even that reports SIGNALING_CONNECTED. Failures
+	// before this point have no channel to report over. Success reports READY itself; the fall-back
+	// ErrNoWebRTCSignaler is expected control flow, not a WebRTC failure, so it is skipped.
+	defer func() {
+		if retErr == nil || errors.Is(retErr, ErrNoWebRTCSignaler) {
+			return
+		}
+		reportConnectionMetadata(ctx, host, signalingClient, &webrtcpb.ReportConnectionMetadataRequest{
+			ReachedStage: webrtcpb.DialStage(reachedStage.Load()),
+			DurationMs:   dialDurationMS(dialStart),
+			FailureCode:  status.Code(retErr).String(),
+		}, logger)
+	}()
+
 	configResp, err := signalingClient.OptionalWebRTCConfig(signalCtx, &webrtcpb.OptionalWebRTCConfigRequest{})
 	if err != nil {
 		// this would be where we would hit an unimplemented signaler error first.
@@ -161,6 +196,8 @@ func dialWebRTC(
 		}
 		return nil, err
 	}
+
+	advance(webrtcpb.DialStage_DIAL_STAGE_CONFIG_FETCHED)
 
 	config := DefaultWebRTCConfiguration
 	if dOpts.webrtcOpts.Config != nil {
@@ -232,12 +269,22 @@ func dialWebRTC(
 		return nil, err
 	}
 
+	// Advance to DTLS_CONNECTED once the peer connection reaches Connected (ICE + DTLS complete),
+	// so a failure between ICE connectivity and data-channel-open is attributed to DTLS vs the data
+	// channel. OnConnectionStateChange is otherwise unused here (ICE state has its own handler).
+	peerConn.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		if state == webrtc.PeerConnectionStateConnected {
+			advance(webrtcpb.DialStage_DIAL_STAGE_DTLS_CONNECTED)
+		}
+	})
+
 	var (
 		statsMu                                        sync.Mutex
 		callUpdates                                    int
 		maxCallUpdateDuration, totalCallUpdateDuration time.Duration
 	)
 	onICEConnected := func() {
+		advance(webrtcpb.DialStage_DIAL_STAGE_ICE_CONNECTED)
 		// Delay by up to 5s to allow more caller updates/better stats.
 		waitTime := 5 * time.Second
 		if testing.Testing() {
@@ -405,6 +452,7 @@ func dialWebRTC(
 		logger.Errorw("Error calling with initial SDP", "err", err)
 		return nil, err
 	}
+	advance(webrtcpb.DialStage_DIAL_STAGE_OFFER_SENT)
 
 	// TODO(RSDK-245): do separate auth here
 	if dOpts.externalAuthAddr != "" { //nolint:revive
@@ -448,6 +496,7 @@ func dialWebRTC(
 				if err != nil {
 					return err
 				}
+				advance(webrtcpb.DialStage_DIAL_STAGE_ANSWER_RECEIVED)
 				close(remoteDescSet)
 
 				if dOpts.webrtcOpts.DisableTrickleICE {
@@ -487,6 +536,16 @@ func dialWebRTC(
 		sendDone()
 		successful = true
 
+		transport := classifyTransport(signalingServer, dOpts.usingMDNS)
+		local, remote := classifyConnection(peerConn.GetStats())
+		reportConnectionMetadata(ctx, host, signalingClient, &webrtcpb.ReportConnectionMetadataRequest{
+			Local:        local,
+			Remote:       remote,
+			ReachedStage: webrtcpb.DialStage_DIAL_STAGE_READY,
+			DurationMs:   dialDurationMS(dialStart),
+			Transport:    transport,
+		}, logger)
+
 		// Ensure the exchange goroutine has exited.
 		exchangeCancel(nil)
 		<-exchangeCtx.Done()
@@ -502,6 +561,8 @@ func dialWebRTC(
 				logger.Debugw("Problem sending error to signaling server", "err", err)
 			}
 		})
+
+		// Failure reporting is handled by the deferred reporter (keyed on the returned error).
 		return nil, exchangeErr
 	}
 
@@ -555,4 +616,106 @@ func iceServerHasTURN(s webrtc.ICEServer) bool {
 		}
 	}
 	return false
+}
+
+// dialDurationMS returns milliseconds elapsed since start (monotonic, so always non-negative).
+func dialDurationMS(start time.Time) uint32 {
+	return uint32(time.Since(start).Milliseconds())
+}
+
+// reportConnectionMetadata sends a WebRTC dial report to the signaling server, best-effort: errors
+// are logged, never propagated. It stamps the SDK type and host, and detaches from ctx cancellation
+// so a dial that failed because ctx was cancelled or timed out can still report (the 5s timeout
+// still bounds it). The caller builds req: reached_stage == READY denotes success (local/remote and
+// transport populated); any earlier stage denotes a failure that stopped there.
+// sdkVersion returns the version of the main module consuming this SDK (best-effort). Empty when
+// built without module info (e.g. `go run` on a throwaway module).
+func sdkVersion() string {
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" {
+		return bi.Main.Version
+	}
+	return ""
+}
+
+func reportConnectionMetadata(
+	ctx context.Context,
+	host string,
+	signalingClient webrtcpb.SignalingServiceClient,
+	req *webrtcpb.ReportConnectionMetadataRequest,
+	logger utils.ZapCompatibleLogger,
+) {
+	req.SdkType = webrtcpb.SDKType_SDK_TYPE_GO
+	req.SdkVersion = sdkVersion()
+
+	utils.PanicCapturingGo(func() {
+		reportCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		reportCtx = metadata.NewOutgoingContext(reportCtx, metadata.New(map[string]string{RPCHostMetadataField: host}))
+
+		if _, err := signalingClient.ReportConnectionMetadata(reportCtx, req); err != nil {
+			logger.Debugw("failed to report connection metadata", "reached_stage", req.GetReachedStage(), "err", err)
+		}
+	})
+}
+
+// classifyTransport derives how a connection was signaled from the signaling address, best-effort
+// and without a DNS lookup: mDNS discovery -> MDNS_LOCAL; a loopback/private/link-local address ->
+// LOCAL (a machine's own or a self-hosted signaler); anything else (a public/remote host) ->
+// CLOUD_SIGNALED.
+func classifyTransport(signalingAddress string, usingMDNS bool) webrtcpb.ConnectionTransport {
+	if usingMDNS {
+		return webrtcpb.ConnectionTransport_CONNECTION_TRANSPORT_MDNS_LOCAL
+	}
+	host := signalingAddress
+	if i := strings.Index(host, "://"); i >= 0 {
+		host = host[i+3:]
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+			return webrtcpb.ConnectionTransport_CONNECTION_TRANSPORT_LOCAL
+		}
+		return webrtcpb.ConnectionTransport_CONNECTION_TRANSPORT_CLOUD_SIGNALED
+	}
+	if host == "localhost" || strings.Contains(host, ".local") {
+		return webrtcpb.ConnectionTransport_CONNECTION_TRANSPORT_LOCAL
+	}
+	return webrtcpb.ConnectionTransport_CONNECTION_TRANSPORT_CLOUD_SIGNALED
+}
+
+// classifyConnection inspects the nominated ICE candidate pair and classifies each side into a
+// ConnectionCandidate. Both are UNSPECIFIED when no succeeded, nominated pair exists.
+func classifyConnection(stats webrtc.StatsReport) (local, remote *webrtcpb.ConnectionCandidate) {
+	var localCandID, remoteCandID string
+	for _, stat := range stats {
+		pair, ok := stat.(webrtc.ICECandidatePairStats)
+		if !ok || !pair.Nominated || pair.State != webrtc.StatsICECandidatePairStateSucceeded {
+			continue
+		}
+		localCandID, remoteCandID = pair.LocalCandidateID, pair.RemoteCandidateID
+		break
+	}
+
+	return classifyCandidate(stats, localCandID), classifyCandidate(stats, remoteCandID)
+}
+
+// classifyCandidate maps a single ICE candidate stat to a ConnectionCandidate; a missing or
+// unrecognized candidate yields the zero value (type UNSPECIFIED). Relay candidates carry the
+// relayed transport address so the signaling server can classify the relay provider.
+func classifyCandidate(stats webrtc.StatsReport, candID string) *webrtcpb.ConnectionCandidate {
+	cand, ok := stats[candID].(webrtc.ICECandidateStats)
+	if !ok {
+		return &webrtcpb.ConnectionCandidate{}
+	}
+	switch cand.CandidateType {
+	case webrtc.ICECandidateTypeHost:
+		return &webrtcpb.ConnectionCandidate{Type: webrtcpb.ICECandidateType_ICE_CANDIDATE_TYPE_HOST}
+	case webrtc.ICECandidateTypeSrflx, webrtc.ICECandidateTypePrflx:
+		return &webrtcpb.ConnectionCandidate{Type: webrtcpb.ICECandidateType_ICE_CANDIDATE_TYPE_STUN}
+	case webrtc.ICECandidateTypeRelay:
+		return &webrtcpb.ConnectionCandidate{Type: webrtcpb.ICECandidateType_ICE_CANDIDATE_TYPE_RELAY, RelayAddress: cand.IP}
+	}
+	return &webrtcpb.ConnectionCandidate{}
 }

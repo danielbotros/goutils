@@ -647,13 +647,15 @@ func reportConnectionMetadata(
 	req.SdkType = webrtcpb.SDKType_SDK_TYPE_GO
 	req.SdkVersion = sdkVersion()
 
-	reportCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-	defer cancel()
-	reportCtx = metadata.NewOutgoingContext(reportCtx, metadata.New(map[string]string{RPCHostMetadataField: host}))
+	utils.PanicCapturingGo(func() {
+		reportCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		reportCtx = metadata.NewOutgoingContext(reportCtx, metadata.New(map[string]string{RPCHostMetadataField: host}))
 
-	if _, err := signalingClient.ReportConnectionMetadata(reportCtx, req); err != nil {
-		logger.Debugw("failed to report connection metadata", "reached_stage", req.GetReachedStage(), "err", err)
-	}
+		if _, err := signalingClient.ReportConnectionMetadata(reportCtx, req); err != nil {
+			logger.Debugw("failed to report connection metadata", "reached_stage", req.GetReachedStage(), "err", err)
+		}
+	})
 }
 
 // classifyTransport derives how a connection was signaled from the signaling address, best-effort

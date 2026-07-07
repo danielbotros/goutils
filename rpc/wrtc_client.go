@@ -269,6 +269,15 @@ func dialWebRTC(
 		return nil, err
 	}
 
+	// Advance to DTLS_CONNECTED once the peer connection reaches Connected (ICE + DTLS complete),
+	// so a failure between ICE connectivity and data-channel-open is attributed to DTLS vs the data
+	// channel. OnConnectionStateChange is otherwise unused here (ICE state has its own handler).
+	peerConn.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		if state == webrtc.PeerConnectionStateConnected {
+			advance(webrtcpb.DialStage_DIAL_STAGE_DTLS_CONNECTED)
+		}
+	})
+
 	var (
 		statsMu                                        sync.Mutex
 		callUpdates                                    int
@@ -443,6 +452,7 @@ func dialWebRTC(
 		logger.Errorw("Error calling with initial SDP", "err", err)
 		return nil, err
 	}
+	advance(webrtcpb.DialStage_DIAL_STAGE_OFFER_SENT)
 
 	// TODO(RSDK-245): do separate auth here
 	if dOpts.externalAuthAddr != "" { //nolint:revive

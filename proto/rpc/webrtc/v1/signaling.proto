@@ -258,12 +258,18 @@ enum DialStage {
 	DIAL_STAGE_SIGNALING_CONNECTED = 1;
 	// DIAL_STAGE_CONFIG_FETCHED: ICE/TURN configuration was fetched from the signaling server.
 	DIAL_STAGE_CONFIG_FETCHED = 2;
+	// DIAL_STAGE_OFFER_SENT: the SDP offer was sent to the signaling server (the Call was accepted).
+	// A failure here means the offer/Call itself failed; ANSWER_RECEIVED means the answerer replied.
+	DIAL_STAGE_OFFER_SENT = 3;
 	// DIAL_STAGE_ANSWER_RECEIVED: the answerer's SDP answer was received and applied.
-	DIAL_STAGE_ANSWER_RECEIVED = 3;
+	DIAL_STAGE_ANSWER_RECEIVED = 4;
 	// DIAL_STAGE_ICE_CONNECTED: ICE connectivity was established (a candidate pair connected).
-	DIAL_STAGE_ICE_CONNECTED = 4;
+	DIAL_STAGE_ICE_CONNECTED = 5;
+	// DIAL_STAGE_DTLS_CONNECTED: the DTLS handshake completed (peer connection connected) but the
+	// data channel is not yet open. Separates DTLS/cert failures from data-channel failures.
+	DIAL_STAGE_DTLS_CONNECTED = 6;
 	// DIAL_STAGE_READY: the connection is fully ready (data channel open). This is success.
-	DIAL_STAGE_READY = 5;
+	DIAL_STAGE_READY = 7;
 }
 
 // ConnectionTransport is how a successful WebRTC connection was signaled, derived from the
